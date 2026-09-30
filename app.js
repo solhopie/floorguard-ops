@@ -127,6 +127,57 @@ var DB = {
    Cycle Count Session/Record, discovered rolls/locations, Documents
    (history cards), and Work Orders. Ported from the legacy prototype's
    tested seed; this store is now the source of truth. */
+/* Run 6: order / sales-order demo fixtures. Fresh objects on every call.
+   Shared by the schema-5 seed and the v4->v5 migration so upgraded stores
+   get the same fixtures a fresh install has. */
+function run6Fixtures(at, dstr, D) {
+  return {
+    orders: [
+      /* Fictional development order (SUBMITTED): the source behind SO-100245. */
+      { id: 'ORD-1000', number: 'ORD-1000', property: 'Ventura Pointe', account: 'Willowbridge',
+        requestedDate: dstr(-2), scheduledDate: dstr(0), priority: 'NORMAL',
+        createdBy: 'Marcus', warehouseId: 'main', internalRef: 'DEV-REF-1',
+        notes: 'Fictional development order.', status: 'SUBMITTED',
+        items: [
+          { id: 'ORD-1000-I1', seq: 1, style: 'Marvel', color: 'Chrome', materialType: 'CARPET',
+            uom: 'LF', widthIn: 144, quantityIn: 237, quantity: null, notes: '' },
+          { id: 'ORD-1000-I2', seq: 2, style: 'Rebond Pad', color: 'Natural', materialType: 'PAD',
+            uom: 'LF', widthIn: 144, quantityIn: 237, quantity: null, notes: '' }
+        ],
+        createdAt: at(2 * D), updatedAt: at(2 * D), submittedAt: at(2 * D), salesOrderId: 'SO-100245' },
+      /* Fictional draft order: a starting point for the Order walkthrough. */
+      { id: 'ORD-1001', number: 'ORD-1001', property: '', account: '',
+        requestedDate: dstr(3), scheduledDate: '', priority: 'NORMAL',
+        createdBy: 'Marcus', warehouseId: 'main', internalRef: '',
+        notes: '', status: 'DRAFT',
+        items: [],
+        createdAt: at(1 * D), updatedAt: at(1 * D), submittedAt: null, salesOrderId: null }
+    ],
+    salesOrders: [
+      /* Fictional development sales order: OPEN, two lines, none released. */
+      { id: 'SO-100245', number: 'SO-100245', sourceOrderId: 'ORD-1000',
+        property: 'Ventura Pointe', account: 'Willowbridge', warehouseId: 'main',
+        priority: 'NORMAL', requestedDate: dstr(-2), scheduledDate: dstr(0),
+        status: 'OPEN', createdBy: 'Marcus', submittedBy: 'Marcus',
+        createdAt: at(2 * D), submittedAt: at(2 * D), updatedAt: at(2 * D),
+        notes: 'Fictional development sales order.',
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        lines: [
+          { id: 'SO-100245-L1', seq: 1, sourceItemId: 'ORD-1000-I1',
+            style: 'Marvel', color: 'Chrome', materialType: 'CARPET',
+            uom: 'LF', widthIn: 144, orderedIn: 237, orderedQty: null,
+            warehouseQtyRequired: 237, status: 'OPEN', workOrderId: null },
+          { id: 'SO-100245-L2', seq: 2, sourceItemId: 'ORD-1000-I2',
+            style: 'Rebond Pad', color: 'Natural', materialType: 'PAD',
+            uom: 'LF', widthIn: 144, orderedIn: 237, orderedQty: null,
+            warehouseQtyRequired: 237, status: 'OPEN', workOrderId: null }
+        ] }
+    ],
+    orderEvents: [],
+    seq: { order: 1002, salesOrder: 100246, workOrder: 2001 }
+  };
+}
+
 function seedFloorguard() {
   var now = Date.now();
   var H = 3600 * 1000, D = 24 * H;
@@ -137,7 +188,7 @@ function seedFloorguard() {
     var m = d.getMonth() + 1, day = d.getDate();
     return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
   };
-  return {
+  var store = {
     rolls: [
       { id: 'QH5CPHN', barcode: 'QH5CPHN', manufacturer: 'Shaw Industries',
         style: 'Venture Solid', color: 'Soft Taupe', widthIn: 144,
@@ -338,54 +389,15 @@ function seedFloorguard() {
         consumedAt: at(1 * D + 2 * H), consumedBy: 'Marcus', cutId: 'K7', actualCutIn: 240 }
     ],
     /* Run 3: append-only audit trail for every assignment action. */
-    assignmentEvents: [],
-    /* Run 6: order / sales-order foundation. orders: commercial drafts;
-       salesOrders: submitted records that generate warehouse work orders;
-       orderEvents: append-only audit for both. seq: number counters. */
-    orders: [
-      /* Fictional development order (SUBMITTED): the source behind SO-100245. */
-      { id: 'ORD-1000', number: 'ORD-1000', property: 'Ventura Pointe', account: 'Willowbridge',
-        requestedDate: dstr(-2), scheduledDate: dstr(0), priority: 'NORMAL',
-        createdBy: 'Marcus', warehouseId: 'main', internalRef: 'DEV-REF-1',
-        notes: 'Fictional development order.', status: 'SUBMITTED',
-        items: [
-          { id: 'ORD-1000-I1', seq: 1, style: 'Marvel', color: 'Chrome', materialType: 'CARPET',
-            uom: 'LF', widthIn: 144, quantityIn: 237, quantity: null, notes: '' },
-          { id: 'ORD-1000-I2', seq: 2, style: 'Rebond Pad', color: 'Natural', materialType: 'PAD',
-            uom: 'LF', widthIn: 144, quantityIn: 237, quantity: null, notes: '' }
-        ],
-        createdAt: at(2 * D), updatedAt: at(2 * D), submittedAt: at(2 * D), salesOrderId: 'SO-100245' },
-      /* Fictional draft order: a starting point for the Order walkthrough. */
-      { id: 'ORD-1001', number: 'ORD-1001', property: '', account: '',
-        requestedDate: dstr(3), scheduledDate: '', priority: 'NORMAL',
-        createdBy: 'Marcus', warehouseId: 'main', internalRef: '',
-        notes: '', status: 'DRAFT',
-        items: [],
-        createdAt: at(1 * D), updatedAt: at(1 * D), submittedAt: null, salesOrderId: null }
-    ],
-    salesOrders: [
-      /* Fictional development sales order: OPEN, two lines, none released. */
-      { id: 'SO-100245', number: 'SO-100245', sourceOrderId: 'ORD-1000',
-        property: 'Ventura Pointe', account: 'Willowbridge', warehouseId: 'main',
-        priority: 'NORMAL', requestedDate: dstr(-2), scheduledDate: dstr(0),
-        status: 'OPEN', createdBy: 'Marcus', submittedBy: 'Marcus',
-        createdAt: at(2 * D), submittedAt: at(2 * D), updatedAt: at(2 * D),
-        notes: 'Fictional development sales order.',
-        onHold: false, holdReason: null, holdAt: null, holdBy: null,
-        lines: [
-          { id: 'SO-100245-L1', seq: 1, sourceItemId: 'ORD-1000-I1',
-            style: 'Marvel', color: 'Chrome', materialType: 'CARPET',
-            uom: 'LF', widthIn: 144, orderedIn: 237, orderedQty: null,
-            warehouseQtyRequired: 237, status: 'OPEN', workOrderId: null },
-          { id: 'SO-100245-L2', seq: 2, sourceItemId: 'ORD-1000-I2',
-            style: 'Rebond Pad', color: 'Natural', materialType: 'PAD',
-            uom: 'LF', widthIn: 144, orderedIn: 237, orderedQty: null,
-            warehouseQtyRequired: 237, status: 'OPEN', workOrderId: null }
-        ] }
-    ],
-    orderEvents: [],
-    seq: { order: 1002, salesOrder: 100246, workOrder: 2001 }
+    assignmentEvents: []
   };
+  /* Run 6: order / sales-order fixtures (shared with the v4->v5 migration). */
+  var f6 = run6Fixtures(at, dstr, D);
+  store.orders = f6.orders;
+  store.salesOrders = f6.salesOrders;
+  store.orderEvents = f6.orderEvents;
+  store.seq = f6.seq;
+  return store;
 }
 
 /* The single FloorGuard inventory store. Every roll/cut/count/document/
@@ -405,9 +417,23 @@ function ensureFloorguardStore() {
 function migrateFloorguardV4toV5() {
   var fg = DB.data.modules['floorguard'];
   if (!fg) return;
-  if (!fg.orders) fg.orders = [];
-  if (!fg.salesOrders) fg.salesOrders = [];
-  if (!fg.orderEvents) fg.orderEvents = [];
+  /* Backfill the Run 6 demo fixtures on stores that predate them, so an
+     upgraded device sees the same SO-100245 / ORD-1000 / ORD-1001 a fresh
+     install has. Only when the collections are absent — never clobber
+     orders the user already created. */
+  if (!fg.orders || !fg.salesOrders) {
+    var now = Date.now(), D = 24 * 3600 * 1000;
+    var at = function (msAgo) { return new Date(now - msAgo).toISOString(); };
+    var dstr = function (dayOffset) {
+      var d = new Date(now + dayOffset * D);
+      var m = d.getMonth() + 1, day = d.getDate();
+      return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+    };
+    var f6 = run6Fixtures(at, dstr, D);
+    if (!fg.orders) fg.orders = f6.orders;
+    if (!fg.salesOrders) fg.salesOrders = f6.salesOrders;
+    if (!fg.orderEvents) fg.orderEvents = f6.orderEvents;
+  }
   if (!fg.seq) fg.seq = { order: 1002, salesOrder: 100246, workOrder: 2001 };
   /* Traceability fields on work orders (Run 6 §20/§22). */
   (fg.workOrders || []).forEach(function (w) {
@@ -3446,10 +3472,13 @@ Screens['order/edit'] = function (param) {
         };
         var del = $('#oh-del');
         if (del) del.onclick = function () {
-          if (!confirm('Discard draft ' + o.number + '?')) return;
-          run6Call(Repository.deleteOrder(o.id), function () {
-            good(); toast('Draft discarded.'); go('order');
-          }, function (e) { bad(); toast((e && e.message) || 'Could not discard draft.'); });
+          showConfirm({ title: 'Discard draft?', body: 'Discard draft ' + o.number + '? This cannot be undone.',
+            okLabel: 'DISCARD', cancelLabel: 'KEEP' }).then(function (yes) {
+            if (!yes) return;
+            run6Call(Repository.deleteOrder(o.id), function () {
+              good(); toast('Draft discarded.'); go('order');
+            }, function (e) { bad(); toast((e && e.message) || 'Could not discard draft.'); });
+          });
         };
       }
     };
@@ -3499,10 +3528,13 @@ Screens['order/edit'] = function (param) {
         });
         Array.prototype.forEach.call(document.querySelectorAll('[data-del]'), function (b) {
           b.onclick = function () {
-            if (!confirm('Remove this item?')) return;
-            run6Call(Repository.removeOrderItem(o.id, b.getAttribute('data-del')),
-              function () { good(); toast('Item removed.'); render(); },
-              function (e) { bad(); toast((e && e.message) || 'Could not remove item.'); });
+            showConfirm({ title: 'Remove item?', body: 'Remove this item from the order?',
+              okLabel: 'REMOVE', cancelLabel: 'KEEP' }).then(function (yes) {
+              if (!yes) return;
+              run6Call(Repository.removeOrderItem(o.id, b.getAttribute('data-del')),
+                function () { good(); toast('Item removed.'); render(); },
+                function (e) { bad(); toast((e && e.message) || 'Could not remove item.'); });
+            });
           };
         });
         var uom = $('#oi-uom');
@@ -3580,17 +3612,20 @@ Screens['order/edit'] = function (param) {
         if (sb) sb.onclick = function () {
           var box = $('#or-err');
           box.hidden = true;
-          if (!confirm('Submit order ' + o.number + ' to the warehouse?')) return;
-          run6Call(Repository.submitOrder(o.id), function (res) {
-            good(); toast('Sales order ' + res.salesOrder.number + ' created.');
-            OWIZ.orderId = null; /* wizard done for this order */
-            go('sales-order', res.salesOrder.id);
-          }, function (e) {
-            bad();
-            box.textContent = (e && e.code === 'OFFLINE')
-              ? 'OFFLINE — ORDER NOT SUBMITTED. The order was not sent.'
-              : ((e && e.message) || 'Submit failed.');
-            box.hidden = false;
+          showConfirm({ title: 'Submit order?', body: 'Submit order ' + o.number + ' to the warehouse? This creates the sales order.',
+            okLabel: 'SUBMIT ORDER', cancelLabel: 'CANCEL' }).then(function (yes) {
+            if (!yes) return;
+            run6Call(Repository.submitOrder(o.id), function (res) {
+              good(); toast('Sales order ' + res.salesOrder.number + ' created.');
+              OWIZ.orderId = null; /* wizard done for this order */
+              go('sales-order', res.salesOrder.id);
+            }, function (e) {
+              bad();
+              box.textContent = (e && e.code === 'OFFLINE')
+                ? 'OFFLINE — ORDER NOT SUBMITTED. The order was not sent.'
+                : ((e && e.message) || 'Submit failed.');
+              box.hidden = false;
+            });
           });
         };
       }
@@ -3783,13 +3818,15 @@ Screens['sales-order'] = function (param) {
         }, function (e) {
           if (e && e.code === 'WAREHOUSE_WORK_EXISTS') {
             bad();
-            if (confirm('Warehouse work orders already exist: ' +
-                (e.data && e.data.workOrders || []).join(', ') +
-                '. Cancel the sales order anyway? Existing work orders are kept — never deleted.')) {
+            showConfirm({ title: 'Work orders exist', body: 'Warehouse work orders already exist: ' +
+              (e.data && e.data.workOrders || []).join(', ') +
+              '. Cancel the sales order anyway? Existing work orders are kept — never deleted.',
+              okLabel: 'CANCEL ANYWAY', cancelLabel: 'KEEP OPEN' }).then(function (yes) {
+              if (!yes) return;
               Repository.cancelSalesOrder(so.id, reason, { force: true }).then(function () {
                 good(); toast('Sales order cancelled. Existing work kept.'); render();
               }).catch(function (e2) { bad(); toast((e2 && e2.message) || 'Cancel failed.'); });
-            }
+            });
             return;
           }
           bad(); toast((e && e.message) || 'Cancel failed.');

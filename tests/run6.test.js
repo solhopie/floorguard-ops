@@ -104,6 +104,9 @@ async function main() {
   ok(Array.isArray(mfg.orders) && Array.isArray(mfg.salesOrders) && Array.isArray(mfg.orderEvents) &&
      mfg.seq.order >= 1002 && mfg.seq.salesOrder >= 100246,
     'v4->v5 migration creates collections and reseeds seq counters above fixtures');
+  ok(mfg.salesOrders.some(function (x) { return x.number === 'SO-100245' && (x.lines || []).length === 2; }) &&
+     mfg.orders.some(function (x) { return x.number === 'ORD-1000' && x.salesOrderId === 'SO-100245'; }),
+    'v4->v5 migration backfills the Run 6 demo fixtures (ORD-1000/SO-100245) on pre-Run-6 stores');
   ok((mfg.workOrders || []).every(function (w) { return 'salesOrderId' in w && 'salesOrderLineId' in w; }),
     'v4->v5 migration backfills work-order traceability fields');
 
