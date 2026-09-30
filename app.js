@@ -25,7 +25,7 @@ function daypart() {
   return 'evening';
 }
 
-var APP_VERSION = '0.2.0';
+var APP_VERSION = '0.3.0';
 
 /* ---------------- data layer ----------------
    One localStorage key, schema version, per-module namespaces.
@@ -33,11 +33,11 @@ var APP_VERSION = '0.2.0';
    through DB.ns('<module-key>'). */
 var DB = {
   KEY: 'floorguard_ops_v1',
-  SCHEMA: 2,
+  SCHEMA: 3,
   data: null,
   seed: function () {
     return {
-      schema: 2,
+      schema: 3,
       currentEmployee: null,
       employees: ['Marcus', 'Dana', 'Luis'],
       employeeRoles: { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' },
@@ -52,16 +52,25 @@ var DB = {
       var raw = localStorage.getItem(this.KEY);
       if (raw) {
         var d = JSON.parse(raw);
-        if (d && d.schema === 2) { this.data = d; ensureFloorguardStore(); return; }
+        if (d && d.schema === 3) { this.data = d; ensureFloorguardStore(); return; }
+        if (d && d.schema === 2) {
+          /* v2 -> v3: Run 3 inventory assignment collections + work-order
+             material lines. Existing roll links and balances are untouched. */
+          d.schema = 3;
+          this.data = d;
+          migrateFloorguardV2toV3();
+          this.save();
+          return;
+        }
         if (d && d.schema === 1) {
           /* v1 -> v2: add warehouse context + roles, seed the shared
              FloorGuard inventory store. Run 1 session data is kept. */
-          d.schema = 2;
+          d.schema = 3;
           if (!d.warehouses) d.warehouses = [{ id: 'main', name: 'Main Warehouse' }];
           if (!d.currentWarehouse) d.currentWarehouse = 'main';
           if (!d.employeeRoles) d.employeeRoles = { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' };
           this.data = d;
-          ensureFloorguardStore();
+          migrateFloorguardV2toV3();
           this.save();
           return;
         }
@@ -110,7 +119,15 @@ function seedFloorguard() {
         beginningIn: 1320, expectedLocation: '204B' },
       { id: 'ZX4LM7B', barcode: 'ZX4LM7B', manufacturer: 'Stanton Carpet',
         style: 'Atelier Wool', color: 'Charcoal', widthIn: 144,
-        beginningIn: 1200, expectedLocation: '204A' }
+        beginningIn: 1200, expectedLocation: '204A' },
+      /* Run 3 inventory-assignment demo rolls: Marvel / Chrome 12 FT carpet.
+         16628697 holds 1034" (86' 2") — the assignment demo roll. */
+      { id: '16628697', barcode: '16628697', manufacturer: 'Shaw',
+        style: 'Marvel', color: 'Chrome', materialType: 'Carpet', widthIn: 144,
+        beginningIn: 1034, expectedLocation: '205B' },
+      { id: '16628698', barcode: '16628698', manufacturer: 'Shaw',
+        style: 'Marvel', color: 'Chrome', materialType: 'Carpet', widthIn: 144,
+        beginningIn: 366, expectedLocation: '206B' }
     ],
     discovered: [],   /* { id, raw, firstSeenAt, firstSeenBy, lastLocation,
                           lastMeasuredIn, lastMeasuredAt, lastMeasuredBy, count } */
@@ -156,23 +173,52 @@ function seedFloorguard() {
                            kind: 'HISTORY_CARD', docType, image, thumb, employee, at,
                            date, time, location, source: 'PAPER CARD', num, imports: [] } */
     workOrders: [
+      /* Run 3: material lines live on the work order. requiredIn is integer
+         inches; status is DERIVED from active inventory assignments —
+         never stored, so it cannot drift. */
       { id: 'WO-1001', number: 'WO-1001', property: 'Maple St Residence', account: 'Acme Flooring Co',
         style: 'Venture Solid', color: 'Soft Taupe', materialType: 'Carpet', uom: 'LF',
         widthIn: 144, quantity: 850, rollId: 'QH5CPHN', assigneeId: 'e1',
-        opStatus: 'IN_PROGRESS', createdAt: at(6 * D) },
+        opStatus: 'IN_PROGRESS', createdAt: at(6 * D),
+        lines: [{ id: 'WO-1001-L1', style: 'Venture Solid', color: 'Soft Taupe', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 850 }] },
       { id: 'WO-1002', number: 'WO-1002', property: 'Oak Ave Residence', account: 'Acme Flooring Co',
         style: 'EverStrand Soft', color: 'Harbor Gray', materialType: 'Carpet', uom: 'LF',
         widthIn: 144, quantity: 620, rollId: 'TK7M2QA', assigneeId: null,
-        opStatus: 'OPEN', createdAt: at(5 * D) },
+        opStatus: 'OPEN', createdAt: at(5 * D),
+        lines: [{ id: 'WO-1002-L1', style: 'EverStrand Soft', color: 'Harbor Gray', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 620 }] },
       { id: 'WO-1003', number: 'WO-1003', property: 'Pine Rd Residence', account: 'HomeStyle Interiors',
         style: 'Pure Earth', color: 'Desert Sand', materialType: 'Carpet', uom: 'LF',
         widthIn: 180, quantity: 400, rollId: null, assigneeId: 'e2',
-        opStatus: 'OPEN', createdAt: at(4 * D) },
+        opStatus: 'OPEN', createdAt: at(4 * D),
+        lines: [{ id: 'WO-1003-L1', style: 'Pure Earth', color: 'Desert Sand', materialType: 'Carpet',
+          uom: 'LF', widthIn: 180, requiredIn: 400 }] },
       { id: 'WO-1004', number: 'WO-1004', property: 'Cedar Ln Residence', account: 'Acme Flooring Co',
         style: 'Tuftex Nylon', color: 'Midnight Blue', materialType: 'Carpet', uom: 'LF',
         widthIn: 144, quantity: 300, rollId: null, assigneeId: null,
-        opStatus: 'OPEN', createdAt: at(3 * D) }
-    ]
+        opStatus: 'OPEN', createdAt: at(3 * D),
+        lines: [{ id: 'WO-1004-L1', style: 'Tuftex Nylon', color: 'Midnight Blue', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 300 }] },
+      /* Run 3 assignment demo orders: Marvel / Chrome 12 FT carpet. */
+      { id: 'XS024536', number: 'XS024536', property: 'Ventura Pointe', account: 'Willowbridge',
+        style: 'Marvel', color: 'Chrome', materialType: 'Carpet', uom: 'LF',
+        widthIn: 144, quantity: 237, rollId: null, assigneeId: 'e1',
+        opStatus: 'OPEN', createdAt: at(2 * D),
+        lines: [{ id: 'XS024536-L1', style: 'Marvel', color: 'Chrome', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 237 }] },
+      { id: 'XS024537', number: 'XS024537', property: 'Harbor Ridge', account: 'Willowbridge',
+        style: 'Marvel', color: 'Chrome', materialType: 'Carpet', uom: 'LF',
+        widthIn: 144, quantity: 495, rollId: null, assigneeId: 'e2',
+        opStatus: 'OPEN', createdAt: at(1 * D),
+        lines: [{ id: 'XS024537-L1', style: 'Marvel', color: 'Chrome', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 495 }] }
+    ],
+    /* Run 3: inventory reservations. Append-only records — reservations NEVER
+       change roll balances; only cut transactions do. */
+    inventoryAssignments: [],
+    /* Run 3: append-only audit trail for every assignment action. */
+    assignmentEvents: []
   };
 }
 
@@ -193,6 +239,258 @@ function FGReset() {
   DB.data.modules['floorguard'] = seedFloorguard();
   DB.save();
 }
+
+/* Run 3 (schema 3): add inventory-assignment collections and material lines
+   to an existing schema-2 FloorGuard store. Balances, cuts, counts, roll
+   links, and history are untouched. */
+function migrateFloorguardV2toV3() {
+  var fg = DB.data.modules['floorguard'];
+  if (!fg) { ensureFloorguardStore(); return; }
+  if (!fg.inventoryAssignments) fg.inventoryAssignments = [];
+  if (!fg.assignmentEvents) fg.assignmentEvents = [];
+  (fg.workOrders || []).forEach(function (w) {
+    if (!w.lines || !w.lines.length) {
+      w.lines = [{ id: w.id + '-L1', style: w.style, color: w.color,
+        materialType: w.materialType, uom: w.uom, widthIn: w.widthIn,
+        requiredIn: Math.round(Number(w.quantity) || 0) }];
+    }
+  });
+  DB.save();
+}
+
+/* ---------------- inventory assignment service (Run 3) ----------------
+   One shared store: work orders <-> material lines <-> inventory
+   assignments <-> rolls <-> cuts <-> roll history. No second database.
+   Reserving inventory NEVER changes a roll's trusted balance — only a
+   recorded CUT transaction changes it. */
+var AI_STATUS = { RESERVED: 'RESERVED', RELEASED: 'RELEASED', CONSUMED: 'CONSUMED' };
+
+function aiSeq() {
+  return 'A' + Date.now().toString(36).toUpperCase().slice(-6) +
+    Math.floor(Math.random() * 46656).toString(36).toUpperCase().padStart(3, '0');
+}
+function aeSeq() {
+  return 'E' + Date.now().toString(36).toUpperCase().slice(-8) +
+    Math.floor(Math.random() * 1296).toString(36).toUpperCase().padStart(2, '0');
+}
+function isSupervisorRole(name) {
+  var r = (DB.data.employeeRoles || {})[name];
+  return r === 'MANAGER' || r === 'ADMIN' || r === 'SUPERVISOR';
+}
+function lineById(wo, lineId) {
+  return ((wo && wo.lines) || []).filter(function (l) { return l.id === lineId; })[0] || null;
+}
+/* A roll record OR a discovered-roll record — both are assignable entities
+   in the shared store. Discovered rolls carry no style/color, so they always
+   route through supervisor review (MATERIAL DATA INCOMPLETE). */
+function assignableRoll(id) {
+  var r = rollById(id);
+  if (r) return r;
+  return (typeof findDiscovered === 'function') ? findDiscovered(id) : null;
+}
+function isDiscoveredRoll(roll) { return !!(roll && roll.beginningIn == null); }
+/* Balance the assignment math can use: trusted system balance for known
+   rolls, the measured balance captured at discovery for unknown rolls,
+   null when nothing is known (supervisor review required). */
+function assignableBalance(roll) {
+  if (!roll) return null;
+  if (!isDiscoveredRoll(roll)) return systemBalance(roll.id);
+  return (roll.lastMeasuredIn != null) ? roll.lastMeasuredIn : null;
+}
+function activeAssignments(woId, lineId) {
+  return (FG().inventoryAssignments || []).filter(function (a) {
+    return a.workOrderId === woId && a.lineId === lineId && a.status === AI_STATUS.RESERVED;
+  });
+}
+function allAssignmentsForLine(woId, lineId) {
+  return (FG().inventoryAssignments || []).filter(function (a) {
+    return a.workOrderId === woId && a.lineId === lineId;
+  });
+}
+/* Total inches currently RESERVED against one roll across ALL work orders.
+   One roll entity, many assignments — the roll is never duplicated. */
+function reservedOnRoll(rollId) {
+  return (FG().inventoryAssignments || []).filter(function (a) {
+    return a.rollId === rollId && a.status === AI_STATUS.RESERVED;
+  }).reduce(function (s, a) { return s + (a.reservedIn || 0); }, 0);
+}
+/* Informational "potential available" — never alters the trusted balance. */
+function potentialAvailable(roll) {
+  var bal = assignableBalance(roll);
+  return (bal == null) ? null : bal - reservedOnRoll(roll.id);
+}
+function lineStatus(wo, line) {
+  var act = activeAssignments(wo.id, line.id);
+  if (!act.length) return 'NOT_ASSIGNED';
+  var tot = act.reduce(function (s, a) { return s + (a.reservedIn || 0); }, 0);
+  return tot >= (line.requiredIn || 0) ? 'ASSIGNED' : 'PARTIALLY_ASSIGNED';
+}
+/* NOT ASSIGNED / PARTIALLY ASSIGNED / ASSIGNED against the material line. */
+function checkCompatibility(roll, line) {
+  var fields = [
+    ['style', roll.style, line.style],
+    ['color', roll.color, line.color],
+    ['widthIn', roll.widthIn, line.widthIn],
+    ['materialType', roll.materialType, line.materialType]
+  ];
+  var missing = [], mismatch = [];
+  fields.forEach(function (f) {
+    var rv = f[1], lv = f[2];
+    if (rv == null || rv === '' || lv == null || lv === '') { missing.push(f[0]); return; }
+    var same = (f[0] === 'widthIn')
+      ? Number(rv) === Number(lv)
+      : String(rv).trim().toLowerCase() === String(lv).trim().toLowerCase();
+    if (!same) mismatch.push({ field: f[0], roll: rv, line: lv });
+  });
+  if (mismatch.length) return { verdict: 'MISMATCH', mismatches: mismatch, missing: missing };
+  if (missing.length) return { verdict: 'INCOMPLETE', mismatches: [], missing: missing };
+  return { verdict: 'MATCH', mismatches: [], missing: [] };
+}
+function overReserved(rollId, newReservedIn) {
+  var roll = assignableRoll(rollId);
+  var bal = assignableBalance(roll);
+  if (bal == null) return { over: false, unknown: true, total: null, balance: null };
+  var total = reservedOnRoll(rollId) + newReservedIn;
+  return { over: total > bal, unknown: false, total: total, balance: bal };
+}
+/* Append-only audit record for every assignment action. */
+function logAssignEvent(action, o) {
+  o = o || {};
+  var now = new Date().toISOString();
+  FG().assignmentEvents.push({
+    id: aeSeq(), at: now,
+    action: action, user: o.user || DB.data.currentEmployee,
+    warehouse: o.warehouse || DB.data.currentWarehouse,
+    workOrderId: o.workOrderId || null, rollId: o.rollId || null,
+    assignmentId: o.assignmentId || null, detail: o.detail || ''
+  });
+  DB.save();
+}
+function assignEventsForWO(woId) {
+  return (FG().assignmentEvents || []).filter(function (e) { return e.workOrderId === woId; })
+    .sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
+}
+/* The reservation itself. Role rules:
+   - MATCH + within balance: any signed-in employee may assign.
+   - MISMATCH / INCOMPLETE material data: supervisor approval required.
+   - OVER-RESERVED: supervisor approval required.
+   - Unknown balance (discovered, never measured): supervisor approval. */
+function assignInventory(o) {
+  var wo = woById(o.woId);
+  if (!wo) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  var line = lineById(wo, o.lineId);
+  if (!line) return { ok: false, err: 'MATERIAL LINE NOT FOUND' };
+  var roll = assignableRoll(o.rollId);
+  if (!roll) return { ok: false, err: 'ROLL NOT FOUND' };
+  var employee = o.employee || DB.data.currentEmployee;
+  if (!employee) return { ok: false, err: 'SIGN IN FIRST' };
+  var reservedIn = Math.round(Number(o.reservedIn) || 0);
+  if (reservedIn <= 0) return { ok: false, err: 'RESERVED QUANTITY MUST BE GREATER THAN ZERO' };
+  var compat = checkCompatibility(roll, line);
+  var bal = assignableBalance(roll);
+  var ov = overReserved(roll.id, reservedIn);
+  var sup = isSupervisorRole(employee);
+  var mismatchBy = o.mismatchApprovedBy || null;
+  var overBy = o.overApprovedBy || null;
+  if ((compat.verdict === 'MISMATCH' || compat.verdict === 'INCOMPLETE') &&
+      !(mismatchBy && isSupervisorRole(mismatchBy)))
+    return { ok: false, err: 'MATERIAL ' + compat.verdict + ' — SUPERVISOR APPROVAL REQUIRED', compat: compat };
+  if (ov.unknown && !(mismatchBy && isSupervisorRole(mismatchBy)))
+    return { ok: false, err: 'BALANCE UNKNOWN — SUPERVISOR APPROVAL REQUIRED' };
+  if (ov.over && !(overBy && isSupervisorRole(overBy)))
+    return { ok: false, err: 'OVER-RESERVED — SUPERVISOR APPROVAL REQUIRED', over: ov };
+  var now = new Date().toISOString();
+  var rec = {
+    id: aiSeq(), workOrderId: wo.id, lineId: line.id, rollId: roll.id,
+    discovered: isDiscoveredRoll(roll),
+    requiredIn: line.requiredIn, reservedIn: reservedIn,
+    employee: employee, warehouseId: DB.data.currentWarehouse,
+    location: roll.expectedLocation || roll.lastLocation || '',
+    at: now, status: AI_STATUS.RESERVED,
+    mismatchApprovedBy: mismatchBy, overApprovedBy: overBy,
+    rollVerifiedAt: null, rollVerifiedBy: null,
+    locationVerifiedAt: null, locationVerifiedBy: null,
+    releasedAt: null, releasedBy: null,
+    consumedAt: null, consumedBy: null, cutId: null, actualCutIn: null
+  };
+  FG().inventoryAssignments.push(rec);
+  logAssignEvent('INVENTORY_ASSIGNED', {
+    user: employee, workOrderId: wo.id, rollId: roll.id, assignmentId: rec.id,
+    detail: 'Roll ' + roll.id + ' → ' + wo.number + ' line ' + line.id +
+      ', reserved ' + fmtLen(reservedIn) + (mismatchBy ? ' (material override: ' + mismatchBy + ')' : '') +
+      (overBy ? ' (over-reservation: ' + overBy + ')' : '')
+  });
+  if (mismatchBy) logAssignEvent('MATERIAL_MISMATCH_OVERRIDE', {
+    user: mismatchBy, workOrderId: wo.id, rollId: roll.id, assignmentId: rec.id,
+    detail: 'Approved ' + compat.verdict + ': ' +
+      compat.mismatches.map(function (m) { return m.field + ' roll=' + m.roll + ' line=' + m.line; }).join(', ')
+  });
+  if (overBy) logAssignEvent('OVER_RESERVATION_APPROVED', {
+    user: overBy, workOrderId: wo.id, rollId: roll.id, assignmentId: rec.id,
+    detail: 'Total reserved ' + fmtLen(ov.total) + ' vs balance ' + fmtLen(ov.balance)
+  });
+  if (wo.opStatus === 'OPEN') wo.opStatus = 'IN_PROGRESS';
+  DB.save();
+  return { ok: true, rec: rec, compat: compat, over: ov };
+}
+/* Release before any cut: status -> RELEASED, record kept forever. */
+function releaseAssignment(assignId, by) {
+  var rec = (FG().inventoryAssignments || []).filter(function (a) { return a.id === assignId; })[0];
+  if (!rec) return { ok: false, err: 'ASSIGNMENT NOT FOUND' };
+  if (rec.status !== AI_STATUS.RESERVED) return { ok: false, err: 'ONLY ACTIVE RESERVATIONS CAN BE RELEASED' };
+  var who = by || DB.data.currentEmployee;
+  if (!isSupervisorRole(who) && rec.employee !== who)
+    return { ok: false, err: 'ONLY A SUPERVISOR OR THE ASSIGNING EMPLOYEE MAY RELEASE' };
+  rec.status = AI_STATUS.RELEASED;
+  rec.releasedAt = new Date().toISOString();
+  rec.releasedBy = who;
+  logAssignEvent('INVENTORY_RELEASED', {
+    user: who, workOrderId: rec.workOrderId, rollId: rec.rollId, assignmentId: rec.id,
+    detail: 'Released ' + fmtLen(rec.reservedIn) + ' reservation'
+  });
+  DB.save();
+  return { ok: true, rec: rec };
+}
+/* A recorded cut consumes the reservation it was assigned for. */
+function consumeAssignment(assignId, o) {
+  var rec = (FG().inventoryAssignments || []).filter(function (a) { return a.id === assignId; })[0];
+  if (!rec) return { ok: false, err: 'ASSIGNMENT NOT FOUND' };
+  if (rec.status !== AI_STATUS.RESERVED) return { ok: false, err: 'ONLY ACTIVE RESERVATIONS CAN BE CONSUMED' };
+  rec.status = AI_STATUS.CONSUMED;
+  rec.consumedAt = new Date().toISOString();
+  rec.consumedBy = o.by || DB.data.currentEmployee;
+  rec.cutId = o.cutId || null;
+  rec.actualCutIn = (o.actualCutIn != null) ? Math.round(o.actualCutIn) : null;
+  logAssignEvent('ASSIGNMENT_CONSUMED', {
+    user: rec.consumedBy, workOrderId: rec.workOrderId, rollId: rec.rollId, assignmentId: rec.id,
+    detail: 'Cut ' + fmtLen(rec.actualCutIn || 0) + (rec.cutId ? ' (' + rec.cutId + ')' : '')
+  });
+  DB.save();
+  return { ok: true, rec: rec };
+}
+/* DISCOVER ROLL inside the assign flow: same discovered-roll record the
+   Free Run flow creates — one shared architecture, no second database. */
+function discoverRollForAssign(code, o) {
+  o = o || {};
+  var norm = normalizeBarcode(code);
+  if (!norm) return { ok: false, err: 'EMPTY CODE' };
+  var existing = rollByBarcode(norm) || findDiscovered(norm);
+  if (existing) return { ok: true, roll: existing, already: true };
+  var meas = (o.measuredIn != null) ? Math.round(o.measuredIn) : null;
+  var d = {
+    id: norm, raw: String(code || ''), firstSeenAt: new Date().toISOString(),
+    firstSeenBy: o.employee || DB.data.currentEmployee,
+    lastLocation: o.location ? normLoc(o.location) : '',
+    lastMeasuredIn: meas, lastMeasuredAt: meas != null ? new Date().toISOString() : null,
+    lastMeasuredBy: meas != null ? (o.employee || DB.data.currentEmployee) : null,
+    count: 1, source: 'ASSIGN_INVENTORY'
+  };
+  FG().discovered.push(d);
+  DB.save();
+  return { ok: true, roll: d, already: false };
+}
+
+
 
 /* ---------------- navigation structure ----------------
    Single source of truth for the drawer, dashboard tiles,
@@ -238,7 +536,7 @@ var MODULE_INFO = {
   'sales-orders':      { icon: '📦', title: 'Sales Orders',
     points: ['Sales order list', 'Order details and line items', 'Fulfillment status'] },
   'assign-inventory':  { icon: '🗂️', title: 'Assign Inventory',
-    points: ['Assign rolls to work and sales orders', 'Reservation tracking', 'Release unneeded reservations'] },
+    points: ['Work order -> material line -> roll reservation', 'Material match / mismatch checks', 'Over-reservation guard', 'Reservation lifecycle: RESERVED / RELEASED / CONSUMED'] },
   'cut-roll-tracking': { icon: '✂️', title: 'Cut / Roll Tracking',
     points: ['Scan Roll', 'Current Balance', 'Work Order', 'Cut amount', 'Permanent cut history per roll'] },
   'cycle-count':       { icon: '🔄', title: 'Cycle Count',
@@ -368,6 +666,8 @@ function matchRoute(path) {
   for (var i = 0; i < keys.length; i++) {
     var k = keys[i];
     if (path === k) return k;
+    /* Query-string entry, e.g. assign-inventory?workOrder=XS024536. */
+    if (path.indexOf(k + '?') === 0) return k;
     if (path.indexOf(k + '/') === 0) return k;
   }
   return null;
@@ -751,6 +1051,15 @@ Screens['balance'] = function () {
 function woById(id) {
   return (FG().workOrders || []).filter(function (w) { return w.id === id; })[0] || null;
 }
+/* Find a work order by its printed number (scan/wedge or typed). */
+function woByNumber(num) {
+  var n = String(num || '').trim().toUpperCase();
+  if (!n) return null;
+  return (FG().workOrders || []).filter(function (w) {
+    return String(w.number || '').trim().toUpperCase() === n ||
+           String(w.id || '').trim().toUpperCase() === n;
+  })[0] || null;
+}
 function woAssigneeName(w) {
   if (!w.assigneeId) return null;
   var m = /^e(\d+)$/.exec(w.assigneeId || '');
@@ -860,7 +1169,18 @@ Screens['work-order'] = function (param) {
         ' <span class="sub">cut <b class="num">' + fmtLen(c.inches) + '</b></span></div>' +
         '<div class="sub">' + esc(c.by) + ' &middot; ' + fmtDT(c.at) + ' &middot; new bal <b class="num">' + fmtLen(c.newIn) + '</b></div></button>';
     }).join('') : '<p class="hint">No cuts recorded against this work order yet.</p>') +
+    '<h2>Inventory activity</h2>' +
+    (function () {
+      var evts = assignEventsForWO(w.id);
+      return evts.length ? evts.map(function (e) {
+        return '<div class="trow"><div><b>' + esc(aiEventLabel(e.action)) + '</b>' +
+          (e.rollId ? ' <span class="mono">' + esc(e.rollId) + '</span>' : '') +
+          (e.detail ? '<div class="sub">' + esc(e.detail) + '</div>' : '') + '</div>' +
+          '<div class="sub">' + esc(e.user) + '<br>' + fmtDT(e.at) + '</div></div>';
+      }).join('') : '<p class="hint">No inventory assignments yet.</p>';
+    })() +
     '<button class="btn btn-primary btn-huge" id="wo-cut">✂️ CUT ROLL FOR THIS ORDER</button>' +
+    '<button class="btn btn-primary btn-huge" id="wo-inv">🗂️ CONTINUE TO INVENTORY</button>' +
     '</div>';
   return { html: html, mount: function () {
     $('#back').onclick = function () { history.back(); };
@@ -887,6 +1207,8 @@ Screens['work-order'] = function (param) {
       if (w.rollId && rollById(w.rollId)) { C.roll = rollById(w.rollId); C.woId = w.id; go('cut/entry'); }
       else go('cut/scan');
     };
+    /* Run 3: WORK ORDERS -> OPEN -> CONTINUE TO INVENTORY -> assign flow. */
+    $('#wo-inv').onclick = function () { go('assign-inventory/wo', w.id); };
     Array.prototype.forEach.call(document.querySelectorAll('[data-roll]'), function (b) {
       b.onclick = function () { go('roll', b.getAttribute('data-roll')); };
     });
@@ -926,6 +1248,625 @@ Screens['work-order/link'] = function (param) {
     DB.save(); good();
     go('work-order', w.id);
   }
+};
+/* ---------------- ASSIGN INVENTORY screens (Run 3) ---------------- */
+var AI = null;    /* assign-flow session: { woId, lineId, rollId, discCode, phase } */
+var AIHUB = { tab: 'needs', q: '', emp: '', prop: '', mtype: '', date: '' };
+
+function aiLineStatusChip(st) {
+  var map = { NOT_ASSIGNED: ['st-red', 'NOT ASSIGNED'],
+    PARTIALLY_ASSIGNED: ['st-yellow', 'PARTIALLY ASSIGNED'],
+    ASSIGNED: ['st-green', 'ASSIGNED'] };
+  var m = map[st] || map.NOT_ASSIGNED;
+  return '<span class="stchip ' + m[0] + '">' + m[1] + '</span>';
+}
+function aiAssignStatusChip(st) {
+  var map = { RESERVED: ['st-blue', 'RESERVED'], RELEASED: ['st-yellow', 'RELEASED'],
+    CONSUMED: ['st-green', 'CONSUMED'] };
+  var m = map[st] || ['st-yellow', st];
+  return '<span class="stchip ' + m[0] + '">' + m[1] + '</span>';
+}
+function aiCompatBanner(compat) {
+  if (compat.verdict === 'MATCH')
+    return '<div class="ok-panel"><div class="big-ok">&#10003; MATERIAL MATCH</div></div>';
+  if (compat.verdict === 'INCOMPLETE')
+    return '<div class="warn-panel"><div class="big-ok">MATERIAL DATA INCOMPLETE</div>' +
+      '<p class="hint">Missing: ' + esc(compat.missing.join(', ')) +
+      '. Supervisor review required before assigning.</p></div>';
+  var rows = compat.mismatches.map(function (m) {
+    return '<div class="kv"><span class="k">' + esc(m.field) + '</span><span class="v">roll <b>' +
+      esc(String(m.roll)) + '</b> vs line <b>' + esc(String(m.line)) + '</b></span></div>';
+  }).join('');
+  return '<div class="warn-panel"><div class="big-ok">&#9888;&#65039; MATERIAL MISMATCH</div>' + rows +
+    '<p class="hint">Clearly mismatched material is never assigned silently — a supervisor must approve.</p></div>';
+}
+function aiEventLabel(action) {
+  var map = { INVENTORY_ASSIGNED: 'INVENTORY ASSIGNED', INVENTORY_RELEASED: 'INVENTORY RELEASED',
+    ROLL_VERIFIED: 'ROLL VERIFIED', LOCATION_VERIFIED: 'LOCATION VERIFIED',
+    OVER_RESERVATION_APPROVED: 'OVER-RESERVATION APPROVED',
+    MATERIAL_MISMATCH_OVERRIDE: 'MATERIAL MISMATCH OVERRIDE',
+    ASSIGNMENT_CONSUMED: 'ASSIGNMENT CONSUMED', ROLL_VERIFICATION_OVERRIDDEN: 'ROLL VERIFICATION OVERRIDDEN' };
+  return map[action] || action;
+}
+function rollLastCut(rollId) {
+  var cuts = (FG().cuts || []).filter(function (c) { return c.rollId === rollId; })
+    .sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
+  return cuts[0] || null;
+}
+function aiMatches(wo, q) {
+  if (!q) return true;
+  var hay = [wo.number, wo.id, wo.property, wo.account]
+    .concat((wo.lines || []).map(function (l) { return l.style + ' ' + l.color + ' ' + l.materialType; }))
+    .concat((FG().inventoryAssignments || []).filter(function (a) { return a.workOrderId === wo.id; })
+      .map(function (a) { return a.rollId; }))
+    .join(' ').toUpperCase();
+  return hay.indexOf(q.toUpperCase()) !== -1;
+}
+
+/* Hub: NEEDS INVENTORY / ASSIGNED / COMPLETED + search + filters.
+   Also honors assign-inventory?workOrder=XS024536 (query) and
+   assign-inventory/wo/<id> (path) entry from a work order. */
+Screens['assign-inventory'] = function () {
+  var raw = parseHash();
+  var qm = raw.match(/^assign-inventory\?(.+)$/);
+  if (qm) {
+    var qp = {};
+    qm[1].split('&').forEach(function (pair) {
+      var kv = pair.split('=');
+      qp[decodeURIComponent(kv[0] || '')] = decodeURIComponent(kv[1] || '');
+    });
+    if (qp.workOrder) {
+      var wq = woByNumber(qp.workOrder) || woById(qp.workOrder);
+      if (wq) { setTimeout(function () { go('assign-inventory/wo', wq.id); }, 0); return { html: '' }; }
+    }
+  }
+  var wos = FG().workOrders || [];
+  var assigns = FG().inventoryAssignments || [];
+  var props = [], mtypes = [], emps = [];
+  wos.forEach(function (w) {
+    if (w.property && props.indexOf(w.property) < 0) props.push(w.property);
+    (w.lines || []).forEach(function (l) {
+      if (l.materialType && mtypes.indexOf(l.materialType) < 0) mtypes.push(l.materialType);
+    });
+    var an = woAssigneeName(w);
+    if (an && emps.indexOf(an) < 0) emps.push(an);
+  });
+  assigns.forEach(function (a) {
+    if (a.employee && emps.indexOf(a.employee) < 0) emps.push(a.employee);
+  });
+  function selOpts(list, cur, label) {
+    return '<option value="">' + label + '</option>' + list.map(function (v) {
+      return '<option value="' + esc(v) + '"' + (cur === v ? ' selected' : '') + '>' + esc(v) + '</option>';
+    }).join('');
+  }
+  var needsRows = '', assignedRows = '', completedRows = '';
+  var nNeeds = 0, nAssigned = 0, nCompleted = 0;
+  wos.forEach(function (w) {
+    if (w.opStatus === 'COMPLETE') return;
+    if (AIHUB.emp && woAssigneeName(w) !== AIHUB.emp) return;
+    if (AIHUB.prop && w.property !== AIHUB.prop) return;
+    if (AIHUB.mtype && !(w.lines || []).some(function (l) { return l.materialType === AIHUB.mtype; })) return;
+    if (!aiMatches(w, AIHUB.q)) return;
+    var openLines = (w.lines || []).filter(function (l) { return lineStatus(w, l) !== 'ASSIGNED'; });
+    if (!openLines.length) return;
+    nNeeds++;
+    needsRows += '<button class="rowbtn" data-wo="' + esc(w.id) + '">' +
+      '<div class="rhead"><b class="mono">' + esc(w.number) + '</b> ' + woStatusChip(w) + '</div>' +
+      '<div class="sub">' + esc(w.property) + ' &middot; ' + esc(w.account) + '</div>' +
+      openLines.map(function (l) {
+        return '<div class="sub">' + esc(l.style) + ' / ' + esc(l.color) + ' &middot; req <b class="num">' +
+          fmtLen(l.requiredIn) + '</b> ' + aiLineStatusChip(lineStatus(w, l)) + '</div>';
+      }).join('') + '</button>';
+  });
+  function assignRow(a) {
+    var w = woById(a.workOrderId);
+    var l = w ? lineById(w, a.lineId) : null;
+    return '<button class="rowbtn" data-a="' + esc(a.id) + '">' +
+      '<div class="rhead"><b class="mono">' + esc(w ? w.number : a.workOrderId) + '</b> ' +
+      aiAssignStatusChip(a.status) + '</div>' +
+      '<div class="sub">Roll <b class="mono">' + esc(a.rollId) + '</b> &middot; reserved <b class="num">' +
+      fmtLen(a.reservedIn) + '</b>' + (l ? ' &middot; ' + esc(l.style) + ' / ' + esc(l.color) : '') + '</div>' +
+      '<div class="sub">' + esc(a.employee) + ' &middot; ' + fmtDT(a.at) + '</div></button>';
+  }
+  assigns.forEach(function (a) {
+    if (AIHUB.emp && a.employee !== AIHUB.emp) return;
+    if (AIHUB.date && String(a.at).slice(0, 10) !== AIHUB.date) return;
+    var w = woById(a.workOrderId);
+    if (AIHUB.prop && (!w || w.property !== AIHUB.prop)) return;
+    var l = w ? lineById(w, a.lineId) : null;
+    if (AIHUB.mtype && (!l || l.materialType !== AIHUB.mtype)) return;
+    if (AIHUB.q && (w ? !aiMatches(w, AIHUB.q) : true) &&
+        String(a.rollId).toUpperCase().indexOf(AIHUB.q.toUpperCase()) < 0) return;
+    if (a.status === AI_STATUS.RESERVED) { nAssigned++; assignedRows += assignRow(a); }
+    else if (a.status === AI_STATUS.CONSUMED) { nCompleted++; completedRows += assignRow(a); }
+  });
+  function tabBtn(key, label, n) {
+    return '<button class="tabbtn' + (AIHUB.tab === key ? ' active' : '') + '" data-tab="' + key + '">' +
+      label + ' <span class="tabcount">' + n + '</span></button>';
+  }
+  var listHtml = AIHUB.tab === 'needs' ? (needsRows || '<p class="hint">Every open work order is fully assigned.</p>')
+    : AIHUB.tab === 'assigned' ? (assignedRows || '<p class="hint">No active reservations.</p>')
+    : (completedRows || '<p class="hint">No completed assignments yet.</p>');
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">&larr; BACK</button>' +
+    '<div class="step-head">WAREHOUSE</div>' +
+    '<h1>ASSIGN INVENTORY</h1>' +
+    '<div class="card">' +
+      '<div class="label">SEARCH WORK ORDER</div>' +
+      '<div class="field"><input class="input mono" id="ai-q" autocomplete="off" autocapitalize="characters" ' +
+        'placeholder="WO #, property, account, style, color, roll" value="' + esc(AIHUB.q) + '"></div>' +
+      '<div class="label">SCAN / ENTER WORK ORDER</div>' +
+      '<div class="cambox" id="ai-cambox"><div class="camnote">Starting camera&hellip;</div></div>' +
+      '<form id="ai-woform"><div class="field"><input class="input mono" id="ai-wo" autocomplete="off" ' +
+        'autocapitalize="characters" placeholder="e.g. XS024536"></div>' +
+      '<button class="btn btn-primary btn-huge" type="submit">OPEN WORK ORDER</button></form>' +
+      '<div class="demolabel">DEMO &mdash; TAP A WORK ORDER</div>' +
+      '<div class="demochips">' + wos.map(function (w) {
+        return '<button class="demochip" data-wochip="' + esc(w.number) + '">' + esc(w.number) + '</button>';
+      }).join('') + '</div>' +
+      '<div id="ai-woresult"></div>' +
+    '</div>' +
+    '<div class="tabs">' + tabBtn('needs', 'NEEDS INVENTORY', nNeeds) +
+      tabBtn('assigned', 'ASSIGNED', nAssigned) + tabBtn('completed', 'COMPLETED', nCompleted) + '</div>' +
+    '<div class="card"><div class="btn-row">' +
+      '<div class="field" style="flex:1"><label class="label">EMPLOYEE</label>' +
+        '<select class="input" id="ai-femp">' + selOpts(emps, AIHUB.emp, 'All') + '</select></div>' +
+      '<div class="field" style="flex:1"><label class="label">PROPERTY</label>' +
+        '<select class="input" id="ai-fprop">' + selOpts(props, AIHUB.prop, 'All') + '</select></div>' +
+    '</div><div class="btn-row">' +
+      '<div class="field" style="flex:1"><label class="label">MATERIAL TYPE</label>' +
+        '<select class="input" id="ai-fmtype">' + selOpts(mtypes, AIHUB.mtype, 'All') + '</select></div>' +
+      '<div class="field" style="flex:1"><label class="label">DATE</label>' +
+        '<input class="input" type="date" id="ai-fdate" value="' + esc(AIHUB.date) + '"></div>' +
+    '</div></div>' +
+    '<div id="ai-list">' + listHtml + '</div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('dashboard'); };
+    $('#ai-q').addEventListener('input', function () { AIHUB.q = $('#ai-q').value; render(); });
+    $('#ai-femp').onchange = function () { AIHUB.emp = $('#ai-femp').value; render(); };
+    $('#ai-fprop').onchange = function () { AIHUB.prop = $('#ai-fprop').value; render(); };
+    $('#ai-fmtype').onchange = function () { AIHUB.mtype = $('#ai-fmtype').value; render(); };
+    $('#ai-fdate').onchange = function () { AIHUB.date = $('#ai-fdate').value; render(); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tab]'), function (b) {
+      b.onclick = function () { AIHUB.tab = b.getAttribute('data-tab'); render(); };
+    });
+    mountScannerBox('ai-cambox', openWO);
+    $('#ai-woform').onsubmit = function (e) { e.preventDefault(); openWO($('#ai-wo').value); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-wochip]'), function (c) {
+      c.onclick = function () { openWO(c.getAttribute('data-wochip')); };
+    });
+    function openWO(code) {
+      var w = woByNumber(code);
+      if (!w) { bad(); $('#ai-woresult').innerHTML = '<div class="err center">&#10060; WORK ORDER NOT FOUND — try again.</div>'; return; }
+      good(); go('assign-inventory/wo', w.id);
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('[data-wo]'), function (b) {
+      b.onclick = function () { go('assign-inventory/wo', b.getAttribute('data-wo')); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-a]'), function (b) {
+      b.onclick = function () { go('assign-inventory/a', b.getAttribute('data-a')); };
+    });
+  }};
+};
+
+/* Work order summary + material lines. */
+Screens['assign-inventory/wo'] = function (param) {
+  var w = woById(param);
+  if (!w) { setTimeout(function () { go('assign-inventory'); }, 0); return { html: '' }; }
+  var an = woAssigneeName(w);
+  var linesHtml = (w.lines || []).map(function (l) {
+    var st = lineStatus(w, l);
+    var act = activeAssignments(w.id, l.id);
+    var hist = allAssignmentsForLine(w.id, l.id).filter(function (a) { return a.status !== AI_STATUS.RESERVED; });
+    var reqLF = (l.requiredIn / 12);
+    return '<div class="card">' +
+      '<div class="rhead"><b>' + esc(l.style) + ' / ' + esc(l.color) + '</b> ' + aiLineStatusChip(st) + '</div>' +
+      '<div class="kv"><span class="k">Material Type</span><span class="v">' + esc(l.materialType || '—') + '</span></div>' +
+      '<div class="kv"><span class="k">UOM</span><span class="v">' + esc(l.uom || '—') + '</span></div>' +
+      '<div class="kv"><span class="k">Width</span><span class="v">' + fmtWidth(l.widthIn) + '</span></div>' +
+      '<div class="kv"><span class="k">Required Quantity</span><span class="v num">' + reqLF.toFixed(2) + ' ' + esc(l.uom || 'LF') +
+        ' <span class="sub">(' + fmtLen(l.requiredIn) + ')</span></span></div>' +
+      (act.length ? '<div class="label" style="margin-top:8px">ASSIGNED INVENTORY</div>' + act.map(function (a) {
+        return '<button class="rowbtn" data-a="' + esc(a.id) + '">' +
+          '<div class="rhead"><b class="mono">' + esc(a.rollId) + '</b> ' + aiAssignStatusChip(a.status) + '</div>' +
+          '<div class="sub">Reserved <b class="num">' + fmtLen(a.reservedIn) + '</b> &middot; ' + esc(a.employee) +
+          ' &middot; ' + fmtDT(a.at) + '</div></button>';
+      }).join('') : '<p class="hint">No inventory assigned yet.</p>') +
+      (st !== 'ASSIGNED'
+        ? '<button class="btn btn-primary btn-huge" data-assign="' + esc(l.id) + '">&#128205; ASSIGN ROLL</button>'
+        : '<button class="btn" data-assign="' + esc(l.id) + '">ASSIGN ANOTHER ROLL</button>') +
+    '</div>';
+  }).join('');
+  var evts = assignEventsForWO(w.id);
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">&larr; BACK</button>' +
+    '<div class="step-head">ASSIGN INVENTORY</div>' +
+    '<div class="label">WORK ORDER</div>' +
+    '<h1 class="mono">' + esc(w.number) + '</h1>' +
+    '<div>' + woAssignChip(w) + ' ' + woStatusChip(w) + '</div>' +
+    '<div class="card">' +
+      '<div class="kv"><span class="k">Property</span><span class="v">' + esc(w.property) + '</span></div>' +
+      '<div class="kv"><span class="k">Account</span><span class="v">' + esc(w.account) + '</span></div>' +
+      '<div class="kv"><span class="k">Assigned Employee</span><span class="v">' + esc(an || 'Unassigned') + '</span></div>' +
+    '</div>' +
+    '<h2>Material Lines</h2>' + linesHtml +
+    '<h2>Inventory Activity</h2>' +
+    (evts.length ? evts.map(function (e) {
+      return '<div class="trow"><div><b>' + esc(aiEventLabel(e.action)) + '</b>' +
+        (e.rollId ? ' <span class="mono">' + esc(e.rollId) + '</span>' : '') +
+        (e.detail ? '<div class="sub">' + esc(e.detail) + '</div>' : '') + '</div>' +
+        '<div class="sub">' + esc(e.user) + '<br>' + fmtDT(e.at) + '</div></div>';
+    }).join('') : '<p class="hint">No inventory activity yet.</p>') +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('assign-inventory'); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-assign]'), function (b) {
+      b.onclick = function () { go('assign-inventory/assign', w.id + '/' + b.getAttribute('data-assign')); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-a]'), function (b) {
+      b.onclick = function () { go('assign-inventory/a', b.getAttribute('data-a')); };
+    });
+  }};
+};
+
+/* Assign-roll flow: scan/search roll -> roll detail + checks -> confirm. */
+Screens['assign-inventory/assign'] = function (param) {
+  var parts = String(param || '').split('/');
+  var w = woById(parts[0]);
+  var line = w ? lineById(w, parts[1]) : null;
+  if (!w || !line) { setTimeout(function () { go('assign-inventory'); }, 0); return { html: '' }; }
+  if (!AI || AI.woId !== w.id || AI.lineId !== line.id) AI = { woId: w.id, lineId: line.id, rollId: null, discCode: null, phase: 'scan' };
+  var html = '<div class="screen">' +
+    '<button class="backbtn" id="back">&larr; BACK</button>' +
+    '<div class="step-head">ASSIGN INVENTORY &mdash; ' + esc(w.number) + '</div>' +
+    '<h1>Assign roll</h1>' +
+    '<div class="card"><div class="kv"><span class="k">Material</span><span class="v"><b>' + esc(line.style) + ' / ' + esc(line.color) +
+      '</b></span></div>' +
+      '<div class="kv"><span class="k">Required</span><span class="v num">' + fmtLen(line.requiredIn) + '</span></div></div>' +
+    '<div id="ai-body"></div></div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { AI = null; go('assign-inventory/wo', w.id); };
+    renderBody();
+    function renderBody() {
+      var body = $('#ai-body');
+      if (AI.phase === 'scan') body.innerHTML = scanHtml(), mountScan();
+      else if (AI.phase === 'roll') body.innerHTML = rollHtml(), mountRoll();
+      else if (AI.phase === 'done') body.innerHTML = doneHtml(), mountDone();
+    }
+    function scanHtml() {
+      if (AI.discCode) {
+        return '<div class="warn-panel"><div class="big-ok">&#10067; UNKNOWN ROLL</div>' +
+          '<p class="hint">"' + esc(AI.discCode) + '" is not in FloorGuard. Create it as a discovered roll, then assignment can continue.</p></div>' +
+          '<div class="card"><div class="label">DISCOVER ROLL</div>' +
+          '<div class="field"><label class="label">CURRENT LOCATION</label>' +
+            '<input class="input mono" id="disc-loc" autocomplete="off" autocapitalize="characters" placeholder="e.g. 205B"></div>' +
+          '<div class="label">MEASURED BALANCE (optional)</div>' +
+          '<div class="btn-row"><div class="field" style="flex:1"><label class="label">FEET</label>' +
+            '<input class="input num" id="disc-ft" inputmode="numeric" autocomplete="off" placeholder="0"></div>' +
+          '<div class="field" style="flex:1"><label class="label">INCHES</label>' +
+            '<input class="input num" id="disc-in" inputmode="decimal" autocomplete="off" placeholder="0"></div></div>' +
+          '<button class="btn btn-primary btn-huge" id="disc-go">DISCOVER ROLL</button>' +
+          '<button class="btn" id="disc-cancel">CANCEL</button></div>';
+      }
+      var chips = FG().rolls.map(function (r) {
+        return '<button class="demochip" data-code="' + esc(r.barcode) + '">' + esc(r.barcode) + '</button>';
+      }).join('');
+      var rollOpts = FG().rolls.map(function (r) {
+        return '<button class="rowbtn" data-rollpick="' + esc(r.id) + '">' +
+          '<div class="rhead"><b class="mono">' + esc(r.id) + '</b> <span class="sub">' + esc(r.style) + ' / ' + esc(r.color) + '</span></div>' +
+          '<div class="sub">loc <b class="mono">' + esc(r.expectedLocation) + '</b> &middot; bal <b class="num">' + fmtLen(systemBalance(r.id)) + '</b></div></button>';
+      }).join('');
+      return '<div class="card"><div class="label">SCAN ROLL</div>' +
+        '<div class="cambox" id="ai-rollcam"><div class="camnote">Starting camera&hellip;</div></div>' +
+        '<form id="ai-rollform"><div class="field"><label class="label">OR TYPE / WEDGE THE BARCODE</label>' +
+        '<input class="input mono" id="ai-rollcode" autocomplete="off" autocapitalize="characters" placeholder="e.g. 16628697"></div>' +
+        '<button class="btn btn-primary btn-huge" type="submit">FIND ROLL</button></form>' +
+        '<div class="demolabel">DEMO &mdash; TAP TO SIMULATE A SCAN</div>' +
+        '<div class="demochips">' + chips + '</div>' +
+        '<div id="ai-rollresult"></div></div>' +
+        '<div class="label" style="margin:12px 0 8px">SEARCH ROLL</div>' +
+        '<div class="field"><input class="input" id="ai-rollsearch" autocomplete="off" placeholder="Filter rolls&hellip;"></div>' +
+        '<div id="ai-rolllist">' + rollOpts + '</div>';
+    }
+    function mountScan() {
+      if (AI.discCode) {
+        $('#disc-cancel').onclick = function () { AI.discCode = null; renderBody(); };
+        $('#disc-go').onclick = function () {
+          var ft = parseFloat($('#disc-ft').value) || 0, inch = parseFloat($('#disc-in').value) || 0;
+          var meas = ($('#disc-ft').value.trim() === '' && $('#disc-in').value.trim() === '') ? null : Math.round(ft * 12 + inch);
+          var res = discoverRollForAssign(AI.discCode, {
+            employee: DB.data.currentEmployee, location: $('#disc-loc').value, measuredIn: meas
+          });
+          if (!res.ok) { bad(); return; }
+          good();
+          AI.rollId = res.roll.id; AI.discCode = null; AI.phase = 'roll';
+          renderBody();
+        };
+        return;
+      }
+      mountScannerBox('ai-rollcam', onRollCode);
+      $('#ai-rollform').onsubmit = function (e) { e.preventDefault(); onRollCode($('#ai-rollcode').value); };
+      Array.prototype.forEach.call(document.querySelectorAll('[data-code]'), function (c) {
+        c.onclick = function () { onRollCode(c.getAttribute('data-code')); };
+      });
+      $('#ai-rollsearch').addEventListener('input', function () {
+        var q = $('#ai-rollsearch').value.toUpperCase();
+        Array.prototype.forEach.call(document.querySelectorAll('[data-rollpick]'), function (b) {
+          b.style.display = b.textContent.toUpperCase().indexOf(q) >= 0 ? '' : 'none';
+        });
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-rollpick]'), function (b) {
+        b.onclick = function () { AI.rollId = b.getAttribute('data-rollpick'); AI.phase = 'roll'; renderBody(); };
+      });
+    }
+    function onRollCode(code) {
+      var norm = normalizeBarcode(code);
+      if (!norm) return;
+      var roll = rollByBarcode(norm);
+      if (roll) { good(); AI.rollId = roll.id; AI.phase = 'roll'; renderBody(); return; }
+      var disc = (typeof findDiscovered === 'function') ? findDiscovered(norm) : null;
+      if (disc) { good(); AI.rollId = disc.id; AI.phase = 'roll'; renderBody(); return; }
+      bad(); AI.discCode = code; renderBody();
+    }
+    function rollHtml() {
+      var roll = assignableRoll(AI.rollId);
+      if (!roll) { AI.phase = 'scan'; return scanHtml(); }
+      var disc = isDiscoveredRoll(roll);
+      var bal = assignableBalance(roll);
+      var compat = checkCompatibility(roll, line);
+      var needIn = line.requiredIn;
+      var alreadyLine = activeAssignments(w.id, line.id).reduce(function (s, a) { return s + a.reservedIn; }, 0);
+      var stillNeed = Math.max(0, needIn - alreadyLine);
+      var resOnRoll = reservedOnRoll(roll.id);
+      var potAvail = potentialAvailable(roll);
+      var lastCut = disc ? null : rollLastCut(roll.id);
+      var qtyOk = bal != null && bal >= needIn;
+      var ov = overReserved(roll.id, stillNeed || needIn);
+      var loc = disc ? (roll.lastLocation || '—') : roll.expectedLocation;
+      var h = '<div class="card">' +
+        '<div class="rhead"><b class="mono" style="font-size:1.4rem">' + esc(roll.id) + '</b>' +
+        (disc ? ' <span class="stchip st-blue">NEWLY DISCOVERED</span>' : '') + '</div>' +
+        '<div class="kv"><span class="k">ROLL ID</span><span class="v mono">' + esc(roll.id) + '</span></div>' +
+        '<div class="kv"><span class="k">Style</span><span class="v">' + esc(roll.style || 'NOT YET IMPORTED') + '</span></div>' +
+        '<div class="kv"><span class="k">Color</span><span class="v">' + esc(roll.color || 'NOT YET IMPORTED') + '</span></div>' +
+        '<div class="kv"><span class="k">Width</span><span class="v">' + (roll.widthIn ? fmtWidth(roll.widthIn) : '—') + '</span></div>' +
+        '<div class="kv"><span class="k">Current Location</span><span class="v mono">' + esc(loc) + '</span></div>' +
+        '<div class="kv"><span class="k">Expected Balance</span><span class="v num" style="font-size:1.3rem">' +
+          (bal != null ? fmtLen(bal) : 'UNKNOWN') + '</span></div>' +
+        (!disc ?
+          '<div class="kv"><span class="k">Measured Balance</span><span class="v num">' +
+            (roll.measuredIn != null ? fmtLen(roll.measuredIn) + ' <span class="stchip st-green">MB ✓</span>' : 'Not measured yet') + '</span></div>' +
+          (roll.measuredAt ? '<div class="kv"><span class="k">Last Measurement</span><span class="v">' + fmtDT(roll.measuredAt) +
+            ' &middot; ' + esc(roll.measuredBy || '') + '</span></div>' : '') +
+          '<div class="kv"><span class="k">Last Cut</span><span class="v">' +
+            (lastCut ? fmtLen(lastCut.inches) + ' &middot; ' + esc(lastCut.by) + ' &middot; ' + fmtDT(lastCut.at) : 'None recorded') + '</span></div>'
+        : '<div class="kv"><span class="k">Measured at Discovery</span><span class="v num">' +
+            (roll.lastMeasuredIn != null ? fmtLen(roll.lastMeasuredIn) : '—') + '</span></div>') +
+        '<div class="kv"><span class="k">Reserved (all jobs)</span><span class="v num">' + fmtLen(resOnRoll) + '</span></div>' +
+        '<div class="kv"><span class="k">Potential Available</span><span class="v num">' +
+          (potAvail != null ? fmtLen(potAvail) : '—') + '</span></div>' +
+        '<div class="btn-row"><button class="btn" id="ai-newroll" style="flex:1">SCAN DIFFERENT ROLL</button>' +
+        '<button class="btn" id="ai-verloc" style="flex:1">&#128205; VERIFY LOCATION</button></div></div>' +
+        aiCompatBanner(compat) +
+        '<div class="card"><div class="label">QUANTITY CHECK</div>' +
+        '<div class="kv"><span class="k">Required</span><span class="v num">' + fmtLen(needIn) + '</span></div>' +
+        '<div class="kv"><span class="k">Roll Balance</span><span class="v num">' + (bal != null ? fmtLen(bal) : 'UNKNOWN') + '</span></div>' +
+        (bal != null
+          ? (qtyOk ? '<div class="ok-panel"><div class="big-ok">&#10003; SUFFICIENT MATERIAL</div></div>'
+                   : '<div class="warn-panel"><div class="big-ok">&#9888;&#65039; INSUFFICIENT MATERIAL</div>' +
+                     '<p class="hint">Required ' + fmtLen(needIn) + ', available ' + fmtLen(bal) +
+                     '. Select another roll — multiple rolls can cover one line.</p></div>')
+          : '<div class="warn-panel"><div class="big-ok">BALANCE UNKNOWN</div><p class="hint">Supervisor review required.</p></div>') +
+        '</div>';
+      if (ov.over) {
+        h += '<div class="warn-panel"><div class="big-ok">&#9888;&#65039; OVER-RESERVED</div>' +
+          '<div class="kv"><span class="k">Expected</span><span class="v num">' + fmtLen(ov.balance) + '</span></div>' +
+          '<div class="kv"><span class="k">Existing Reservations</span><span class="v num">' + fmtLen(resOnRoll) + '</span></div>' +
+          '<div class="kv"><span class="k">This Reservation</span><span class="v num">' + fmtLen(stillNeed || needIn) + '</span></div>' +
+          '<div class="kv"><span class="k">Total Reserved</span><span class="v num">' + fmtLen(ov.total) + '</span></div>' +
+          '<p class="hint">Supervisor confirmation required before assigning.</p></div>';
+      }
+      var needsSup = compat.verdict !== 'MATCH' || ov.over || bal == null;
+      var sup = isSupervisorRole(DB.data.currentEmployee);
+      var dft = Math.floor((stillNeed || needIn) / 12), din = (stillNeed || needIn) % 12;
+      h += '<div class="card"><div class="label">RESERVE QUANTITY</div>' +
+        '<div class="btn-row"><div class="field" style="flex:1"><label class="label">FEET</label>' +
+          '<input class="input num" id="ai-ft" inputmode="numeric" autocomplete="off" value="' + dft + '"></div>' +
+        '<div class="field" style="flex:1"><label class="label">INCHES</label>' +
+          '<input class="input num" id="ai-in" inputmode="decimal" autocomplete="off" value="' + din + '"></div></div>';
+      if (needsSup) {
+        h += sup
+          ? '<label class="checkline"><input type="checkbox" id="ai-supok"> <b>SUPERVISOR APPROVAL</b> — I (' +
+            esc(DB.data.currentEmployee) + ') approve this assignment.</label>'
+          : '<div class="err center">SUPERVISOR APPROVAL REQUIRED<br><span class="hint">Ask a supervisor (e.g. Marcus) to sign in and approve.</span></div>';
+      }
+      h += '<div class="err" id="ai-err" hidden></div>' +
+        '<button class="btn btn-primary btn-huge" id="ai-assign">ASSIGN INVENTORY</button></div>';
+      return h;
+    }
+    function mountRoll() {
+      $('#ai-newroll').onclick = function () { AI.rollId = null; AI.phase = 'scan'; renderBody(); };
+      $('#ai-verloc').onclick = function () {
+        var roll = assignableRoll(AI.rollId);
+        go('assign-inventory/verify-loc', 'pending/' + encodeURIComponent(roll.id) + '/' + encodeURIComponent(w.id + '/' + line.id));
+      };
+      var supbox = $('#ai-supok');
+      $('#ai-assign').onclick = function () {
+        var roll = assignableRoll(AI.rollId);
+        var ft = parseFloat($('#ai-ft').value) || 0, inch = parseFloat($('#ai-in').value) || 0;
+        var reservedIn = Math.round(ft * 12 + inch);
+        var compat = checkCompatibility(roll, line);
+        var ov = overReserved(roll.id, reservedIn);
+        var bal = assignableBalance(roll);
+        var needsSup = compat.verdict !== 'MATCH' || ov.over || bal == null;
+        var supName = null;
+        if (needsSup) {
+          if (!isSupervisorRole(DB.data.currentEmployee) || !(supbox && supbox.checked)) {
+            var e = $('#ai-err'); e.textContent = 'SUPERVISOR APPROVAL REQUIRED'; e.hidden = false; bad(); return;
+          }
+          supName = DB.data.currentEmployee;
+        }
+        var res = assignInventory({
+          woId: w.id, lineId: line.id, rollId: roll.id, reservedIn: reservedIn,
+          employee: DB.data.currentEmployee,
+          mismatchApprovedBy: (compat.verdict !== 'MATCH' || bal == null) ? supName : null,
+          overApprovedBy: ov.over ? supName : null
+        });
+        if (!res.ok) { var e2 = $('#ai-err'); e2.textContent = res.err; e2.hidden = false; bad(); return; }
+        good();
+        AI.assignId = res.rec.id; AI.phase = 'done';
+        renderBody();
+      };
+    }
+    function doneHtml() {
+      var rec = (FG().inventoryAssignments || []).filter(function (a) { return a.id === AI.assignId; })[0];
+      if (!rec) return '<p class="hint">Assignment not found.</p>';
+      return '<div class="ok-panel"><div class="big-ok">&#10003; INVENTORY ASSIGNED</div>' +
+        '<div class="kv"><span class="k">Assignment</span><span class="v mono">' + esc(rec.id) + '</span></div>' +
+        '<div class="kv"><span class="k">Roll</span><span class="v mono">' + esc(rec.rollId) + '</span></div>' +
+        '<div class="kv"><span class="k">Quantity Reserved</span><span class="v num">' + fmtLen(rec.reservedIn) + '</span></div>' +
+        '<div class="kv"><span class="k">Employee</span><span class="v">' + esc(rec.employee) + '</span></div>' +
+        '<div class="kv"><span class="k">Status</span><span class="v">' + aiAssignStatusChip(rec.status) + '</span></div></div>' +
+        '<p class="hint">The reservation does not change the roll balance. The balance changes only when the cut is recorded.</p>' +
+        '<button class="btn btn-primary btn-huge" id="ai-tocut">&#9986; CONTINUE TO CUT</button>' +
+        '<button class="btn" id="ai-towo">BACK TO WORK ORDER</button>';
+    }
+    function mountDone() {
+      $('#ai-towo').onclick = function () { AI = null; go('assign-inventory/wo', w.id); };
+      $('#ai-tocut').onclick = function () {
+        var rec = (FG().inventoryAssignments || []).filter(function (a) { return a.id === AI.assignId; })[0];
+        var roll = rollById(rec.rollId);
+        if (!roll) { bad(); return; }
+        newCutSession();
+        C.roll = roll; C.woId = w.id; C.assignId = rec.id; C.lineId = rec.lineId;
+        C.requiredIn = rec.reservedIn; C.needVerify = true; C.rollVerified = false;
+        AI = null;
+        go('cut/entry');
+      };
+    }
+  }};
+};
+
+/* Assignment detail: full record, release, continue to cut, verify location. */
+Screens['assign-inventory/a'] = function (param) {
+  var rec = (FG().inventoryAssignments || []).filter(function (a) { return a.id === param; })[0];
+  if (!rec) { setTimeout(function () { go('assign-inventory'); }, 0); return { html: '' }; }
+  var w = woById(rec.workOrderId);
+  var line = w ? lineById(w, rec.lineId) : null;
+  var roll = assignableRoll(rec.rollId);
+  var active = rec.status === AI_STATUS.RESERVED;
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">&larr; BACK</button>' +
+    '<div class="step-head">ASSIGN INVENTORY</div>' +
+    '<div class="label">INVENTORY ASSIGNMENT</div>' +
+    '<h1 class="mono">' + esc(rec.id) + '</h1>' +
+    '<div>' + aiAssignStatusChip(rec.status) + '</div>' +
+    '<div class="card">' +
+      '<div class="kv"><span class="k">Work Order</span><span class="v mono">' + esc(w ? w.number : rec.workOrderId) + '</span></div>' +
+      '<div class="kv"><span class="k">Property</span><span class="v">' + esc(w ? w.property : '—') + '</span></div>' +
+      (line ? '<div class="kv"><span class="k">Material Line</span><span class="v">' + esc(line.style) + ' / ' + esc(line.color) + '</span></div>' : '') +
+      '<div class="kv"><span class="k">Roll ID</span><span class="v mono">' + esc(rec.rollId) + '</span></div>' +
+      '<div class="kv"><span class="k">Required Quantity</span><span class="v num">' + fmtLen(rec.requiredIn) + '</span></div>' +
+      '<div class="kv"><span class="k">Reserved Quantity</span><span class="v num">' + fmtLen(rec.reservedIn) + '</span></div>' +
+      '<div class="kv"><span class="k">Employee</span><span class="v">' + esc(rec.employee) + '</span></div>' +
+      '<div class="kv"><span class="k">Location</span><span class="v mono">' + esc(rec.location || '—') +
+        (rec.locationVerifiedAt ? ' <span class="stchip st-green">VERIFIED ✓</span>' : '') + '</span></div>' +
+      '<div class="kv"><span class="k">Date / Time</span><span class="v">' + fmtDT(rec.at) + '</span></div>' +
+      (rec.mismatchApprovedBy ? '<div class="kv"><span class="k">Material Override</span><span class="v">' + esc(rec.mismatchApprovedBy) + '</span></div>' : '') +
+      (rec.overApprovedBy ? '<div class="kv"><span class="k">Over-Reservation</span><span class="v">' + esc(rec.overApprovedBy) + '</span></div>' : '') +
+      (rec.rollVerifiedAt ? '<div class="kv"><span class="k">Roll Verified</span><span class="v">' + fmtDT(rec.rollVerifiedAt) + ' &middot; ' + esc(rec.rollVerifiedBy || '') + '</span></div>' : '') +
+      (rec.releasedAt ? '<div class="kv"><span class="k">Released</span><span class="v">' + fmtDT(rec.releasedAt) + ' &middot; ' + esc(rec.releasedBy || '') + '</span></div>' : '') +
+      (rec.consumedAt ? '<div class="kv"><span class="k">Consumed</span><span class="v">' + fmtDT(rec.consumedAt) + ' &middot; ' + esc(rec.consumedBy || '') +
+        ' &middot; cut <span class="num">' + fmtLen(rec.actualCutIn || 0) + '</span></span></div>' : '') +
+    '</div>' +
+    (active ?
+      '<button class="btn btn-primary btn-huge" id="a-tocut">&#9986; CONTINUE TO CUT</button>' +
+      '<button class="btn btn-huge" id="a-verloc">&#128205; VERIFY LOCATION</button>' +
+      '<button class="btn btn-huge" id="a-release" style="color:var(--red)">RELEASE ASSIGNMENT</button>'
+    : '') +
+    (w ? '<button class="btn" id="a-wo">OPEN WORK ORDER</button>' : '') +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { history.back(); };
+    if (w) $('#a-wo').onclick = function () { go('assign-inventory/wo', w.id); };
+    if (!active) return;
+    $('#a-verloc').onclick = function () { go('assign-inventory/verify-loc', rec.id); };
+    $('#a-tocut').onclick = function () {
+      var r = rollById(rec.rollId);
+      if (!r) { bad(); return; }
+      newCutSession();
+      C.roll = r; C.woId = rec.workOrderId; C.assignId = rec.id; C.lineId = rec.lineId;
+      C.requiredIn = rec.reservedIn; C.needVerify = true; C.rollVerified = false;
+      go('cut/entry');
+    };
+    $('#a-release').onclick = function () {
+      showConfirm({ title: 'Release assignment ' + rec.id + '?',
+        body: 'Releases ' + fmtLen(rec.reservedIn) + ' reserved on roll ' + rec.rollId + '. The record is kept as history.',
+        okLabel: 'RELEASE' }).then(function (ok) {
+        if (!ok) return;
+        var res = releaseAssignment(rec.id, DB.data.currentEmployee);
+        if (!res.ok) { bad(); return; }
+        good(); render();
+      });
+    };
+  }};
+};
+
+/* Verify the roll's warehouse location with the existing scanner. */
+Screens['assign-inventory/verify-loc'] = function (param) {
+  var assignId = param, retAssign = null;
+  if (param.indexOf('pending/') === 0) {
+    var rest = decodeURIComponent(param.slice(8));
+    var firstSlash = rest.indexOf('/');
+    assignId = null;
+    retAssign = { rollId: firstSlash < 0 ? rest : rest.slice(0, firstSlash),
+                  backTo: firstSlash < 0 ? null : rest.slice(firstSlash + 1) };
+  }
+  var rec = assignId ? (FG().inventoryAssignments || []).filter(function (a) { return a.id === assignId; })[0] : null;
+  var rollId = rec ? rec.rollId : (retAssign ? retAssign.rollId : null);
+  var roll = rollId ? assignableRoll(rollId) : null;
+  if (!roll) { setTimeout(function () { go('assign-inventory'); }, 0); return { html: '' }; }
+  var loc = isDiscoveredRoll(roll) ? (roll.lastLocation || '') : roll.expectedLocation;
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">&larr; BACK</button>' +
+    '<div class="step-head">VERIFY LOCATION &mdash; <span class="mono">' + esc(roll.id) + '</span></div>' +
+    '<h1>Verify location</h1>' +
+    '<div class="card"><div class="kv"><span class="k">Expected Location</span><span class="v mono" style="font-size:1.3rem">' +
+      esc(loc || '—') + '</span></div></div>' +
+    '<div class="card"><div class="label">SCAN LOCATION</div>' +
+    '<div class="cambox" id="vl-cam"><div class="camnote">Starting camera&hellip;</div></div>' +
+    '<form id="vl-form"><div class="field"><label class="label">OR TYPE THE LOCATION</label>' +
+    '<input class="input mono" id="vl-code" autocomplete="off" autocapitalize="characters" placeholder="e.g. 205B"></div>' +
+    '<button class="btn btn-primary btn-huge" type="submit">VERIFY</button></form>' +
+    '<div id="vl-result"></div></div></div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { history.back(); };
+    mountScannerBox('vl-cam', onCode);
+    $('#vl-form').onsubmit = function (e) { e.preventDefault(); onCode($('#vl-code').value); };
+    function onCode(code) {
+      if (normLoc(code) === normLoc(loc) && normLoc(loc)) {
+        good();
+        var now = new Date().toISOString();
+        if (rec) {
+          rec.locationVerifiedAt = now; rec.locationVerifiedBy = DB.data.currentEmployee;
+          logAssignEvent('LOCATION_VERIFIED', { user: DB.data.currentEmployee,
+            workOrderId: rec.workOrderId, rollId: roll.id, assignmentId: rec.id,
+            detail: 'Location ' + loc + ' verified' });
+          DB.save();
+        }
+        $('#vl-result').innerHTML = '<div class="ok-panel"><div class="big-ok">&#10003; LOCATION VERIFIED</div></div>';
+      } else {
+        bad();
+        $('#vl-result').innerHTML = '<div class="err center">&#10060; LOCATION MISMATCH — scanned "' +
+          esc(code) + '", expected "' + esc(loc) + '".</div>';
+      }
+    }
+  }};
 };
 
 /* ---------------- boot ---------------- */
@@ -1315,7 +2256,11 @@ function newSession() {
 /* Cut-transaction session. */
 var C = null;
 function newCutSession() {
-  C = { roll: null, order: '', cutIn: null };
+  /* Run 3: assignId/lineId/requiredIn + needVerify carry an inventory
+     assignment into the cut flow. rollVerified gates SAVE CUT. */
+  C = { roll: null, order: '', cutIn: null, woId: null,
+        assignId: null, lineId: null, requiredIn: null,
+        needVerify: false, rollVerified: false };
 }
 /* Rapid cycle-count session: one active location, then roll after roll. */
 var R = null;
@@ -1759,10 +2704,32 @@ Screens['cut/entry'] = function () {
   var orderOpts = CutService.recentOrders().map(function (o) {
     return '<option value="' + esc(o) + '">';
   }).join('');
+  /* Run 3: assignment banner + roll verification when cutting from an
+     inventory assignment. The worker verifies the physical roll barcode
+     before cutting — the assignment is not consumed until the cut saves. */
+  var assignBanner = '';
+  if (C.assignId) {
+    var awo = C.woId ? woById(C.woId) : null;
+    assignBanner =
+      '<div class="card" style="border:2px solid var(--blue)">' +
+      '<div class="label">CUTTING FROM INVENTORY ASSIGNMENT</div>' +
+      '<div class="kv"><span class="k">Work Order</span><span class="v mono">' + esc(awo ? awo.number : (C.woId || '—')) + '</span></div>' +
+      '<div class="kv"><span class="k">Roll</span><span class="v mono">' + esc(roll.id) + '</span></div>' +
+      '<div class="kv"><span class="k">Required</span><span class="v num">' + fmtLen(C.requiredIn || 0) + '</span></div>' +
+      '<div class="kv"><span class="k">Current Balance</span><span class="v num">' + fmtLen(bal) + '</span></div></div>' +
+      '<div class="card" id="verifycard"><div class="label">VERIFY ROLL BARCODE</div>' +
+      '<div class="cambox" id="cut-verifybox"><div class="camnote">Starting camera&hellip;</div></div>' +
+      '<form id="cut-verifyform"><div class="field">' +
+      '<input class="input mono" id="cut-verifycode" autocomplete="off" autocapitalize="characters" placeholder="Scan or type the roll barcode"></div>' +
+      '<button class="btn btn-primary" type="submit">VERIFY ROLL</button></form>' +
+      '<div id="cut-verifyresult"></div></div>';
+  }
+  var preFt = '', preIn = '';
+  if (C.requiredIn) { preFt = String(Math.floor(C.requiredIn / 12)); preIn = String(C.requiredIn % 12); }
   var html =
     '<div class="screen">' +
     '<div class="step-head">CUT TRANSACTION &mdash; ENTER CUT</div>' +
-    '<h1>Record a cut</h1>' +
+    '<h1>Record a cut</h1>' + assignBanner +
     '<div class="card">' +
       '<div class="kv"><span class="k">Roll #</span><span class="v mono">' + esc(roll.id) + '</span></div>' +
       '<div class="kv"><span class="k">Style</span><span class="v">' + esc(roll.style) + '</span></div>' +
@@ -1780,9 +2747,9 @@ Screens['cut/entry'] = function () {
     '<div class="field"><label class="label">CUT LENGTH</label></div>' +
     '<div class="btn-row">' +
       '<div class="field" style="flex:1"><label class="label">FEET</label>' +
-      '<input class="input num" id="cft" inputmode="numeric" autocomplete="off" placeholder="0"></div>' +
+      '<input class="input num" id="cft" inputmode="numeric" autocomplete="off" placeholder="0" value="' + esc(preFt) + '"></div>' +
       '<div class="field" style="flex:1"><label class="label">INCHES</label>' +
-      '<input class="input num" id="cin" inputmode="decimal" autocomplete="off" placeholder="0"></div>' +
+      '<input class="input num" id="cin" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(preIn) + '"></div>' +
     '</div>' +
     '<div class="card"><div class="kv"><span class="k">NEW EXPECTED BALANCE</span>' +
       '<span class="v num" id="newbal" style="font-size:1.5rem">= ' + fmtLen(bal) + '</span></div></div>' +
@@ -1801,9 +2768,47 @@ Screens['cut/entry'] = function () {
     $('#cft').addEventListener('input', update);
     $('#cin').addEventListener('input', update);
     $('#cutcancel').onclick = function () { newCutSession(); go('dashboard'); };
+    /* Run 3: roll verification before cutting from an assignment. */
+    if (C.needVerify) {
+      mountScannerBox('cut-verifybox', onVerifyCode);
+      $('#cut-verifyform').onsubmit = function (e) { e.preventDefault(); onVerifyCode($('#cut-verifycode').value); };
+    }
+    function onVerifyCode(code) {
+      var v = rollByBarcode(code);
+      var box = $('#cut-verifyresult');
+      if (v && v.id === C.roll.id) {
+        good();
+        C.rollVerified = true;
+        var now = new Date().toISOString();
+        var rec0 = (FG().inventoryAssignments || []).filter(function (a) { return a.id === C.assignId; })[0];
+        if (rec0) { rec0.rollVerifiedAt = now; rec0.rollVerifiedBy = DB.data.currentEmployee; DB.save(); }
+        logAssignEvent('ROLL_VERIFIED', { user: DB.data.currentEmployee, workOrderId: C.woId,
+          rollId: C.roll.id, assignmentId: C.assignId, detail: '✓ CORRECT ROLL' });
+        box.innerHTML = '<div class="ok-panel"><div class="big-ok">&#10003; CORRECT ROLL</div></div>';
+      } else {
+        bad();
+        C.rollVerified = false;
+        var sup = isSupervisorRole(DB.data.currentEmployee);
+        box.innerHTML = '<div class="err center">&#9888;&#65039; WRONG ROLL FOR THIS WORK ORDER<br>' +
+          '<span style="font-size:1rem">Scanned "' + esc(code) + '", expected "' + esc(C.roll.id) + '".</span></div>' +
+          (sup ? '<button class="btn" id="cut-verifyoverride" style="margin-top:8px">SUPERVISOR OVERRIDE — PROCEED ANYWAY</button>' : '');
+        if (sup && $('#cut-verifyoverride')) $('#cut-verifyoverride').onclick = function () {
+          C.rollVerified = true;
+          logAssignEvent('ROLL_VERIFICATION_OVERRIDDEN', { user: DB.data.currentEmployee, workOrderId: C.woId,
+            rollId: C.roll.id, assignmentId: C.assignId, detail: 'Supervisor overrode wrong-roll warning; scanned "' + code + '"' });
+          box.innerHTML = '<div class="warn-panel"><div class="big-ok">OVERRIDE ACCEPTED</div></div>';
+          good();
+        };
+      }
+    }
     $('#savecut').onclick = function () {
       var ft = $('#cft').value.trim(), inch = $('#cin').value.trim();
       var cutIn = Math.round((parseFloat(ft || '0')) * 12 + parseFloat(inch || '0'));
+      if (C.needVerify && !C.rollVerified) {
+        bad();
+        var ve = $('#cuterr'); ve.textContent = 'VERIFY THE ROLL BARCODE BEFORE CUTTING'; ve.hidden = false;
+        return;
+      }
       var woId = $('#wo').value;
       var wo = woId ? woById(woId) : null;
       var orderVal = wo ? wo.number : $('#order').value;
@@ -1813,6 +2818,10 @@ Screens['cut/entry'] = function () {
         employee: DB.data.currentEmployee, location: roll.expectedLocation
       });
       if (!res.ok) { bad(); var e = $('#cuterr'); e.textContent = res.err; e.hidden = false; return; }
+      /* Run 3: the cut consumes the reservation it was assigned for. */
+      if (C.assignId) {
+        consumeAssignment(C.assignId, { cutId: res.rec.id, actualCutIn: cutIn, by: DB.data.currentEmployee });
+      }
       if (wo) {
         /* WORK ORDER -> ASSIGN INVENTORY -> CUT: the cut roll becomes the
            order's roll and the order moves to IN_PROGRESS. */
@@ -1954,6 +2963,11 @@ function ledgerHtml(roll) {
   (FG().workOrders || []).forEach(function (w) {
     if (w.rollId === roll.id) ev.push({ kind: 'wo', at: w.createdAt, wo: w });
   });
+  /* Run 3: inventory assignments are append-only roll history — ASSIGNED TO
+     WORK ORDER events with property, reserved quantity, employee, date/time. */
+  (FG().inventoryAssignments || []).forEach(function (a) {
+    if (a.rollId === roll.id) ev.push({ kind: 'assign', at: a.at, a: a });
+  });
   FG().counts.forEach(function (c) {
     if (c.rollId === roll.id) ev.push({ kind: 'count', at: c.at, rec: c });
   });
@@ -2034,6 +3048,16 @@ function ledgerHtml(roll) {
         '<div class="sub">' + fmtDT(im.confirmedAt) + ' &middot; ' + esc(im.confirmedBy) + '</div>' +
         '<div class="sub">' + importSummary(im.fields) + '</div></div>' +
         '<div class="bal"><button class="btn btn-xs" data-docview="' + esc(im.docId || e.doc.id) + '">VIEW DOCUMENT</button></div></div>';
+    } else if (e.kind === 'assign') {
+      /* ASSIGNED TO WORK ORDER: the append-only assignment record. The roll's
+         trusted balance is unchanged — only cuts change it. */
+      var as = e.a, awo = woById(as.workOrderId);
+      out += '<div class="ledger-row"><span class="dot" style="background:#a78bfa"></span>' +
+        '<div class="what"><b>Assigned to Work Order</b> <span class="mono">' + esc(awo ? awo.number : as.workOrderId) + '</span> ' +
+        aiAssignStatusChip(as.status) +
+        '<div class="sub">' + esc(awo ? awo.property : '') + ' &middot; reserved <span class="num">' + fmtLen(as.reservedIn) + '</span>' +
+        ' &middot; ' + fmtDT(as.at) + ' &middot; ' + esc(as.employee) + ' &middot; <span class="srcchip">FLOORGUARD</span></div></div>' +
+        '<div class="bal"><div class="sub">Required</div><span class="num">' + fmtLen(as.requiredIn) + '</span></div></div>';
     }
   });
   return out;

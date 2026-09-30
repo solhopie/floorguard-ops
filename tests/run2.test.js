@@ -219,7 +219,7 @@ ok(doc.num === 1, 'first card is HISTORY CARD #1');
 
 /* ---------- Work Orders ---------- */
 freshDB();
-ok(S.FG().workOrders.length === 4, '4 seeded work orders');
+ok(S.FG().workOrders.length === 6, '6 seeded work orders (WO-1001..1004 + XS024536/XS024537)');
 ok(S.woById('WO-1001').number === 'WO-1001', 'woById resolves');
 var w = S.woById('WO-1002');
 ok(!w.assigneeId, 'WO-1002 starts unassigned');
@@ -227,7 +227,7 @@ w.assigneeId = 'e2'; S.DB.save();
 ok(S.woById('WO-1002').assigneeId === 'e2', 'assignment persists');
 var assigned = S.FG().workOrders.filter(function (x) { return !!x.assigneeId; });
 var unassigned = S.FG().workOrders.filter(function (x) { return !x.assigneeId; });
-ok(assigned.length === 3 && unassigned.length === 1, 'ALL / ASSIGNED / UNASSIGNED filter basis');
+ok(assigned.length === 5 && unassigned.length === 1, 'ALL / ASSIGNED / UNASSIGNED filter basis');
 S.woById('WO-1004').opStatus = 'COMPLETE';
 ok(S.woStatusChip(S.woById('WO-1004')).indexOf('st-green') >= 0, 'COMPLETE chip renders green');
 /* navigation */
@@ -275,7 +275,7 @@ S.NAV.forEach(function (g) {
 var old = { schema: 1, currentEmployee: 'Marcus', modules: {} };
 store[S.DB.KEY] = JSON.stringify(old);
 S.DB.load();
-ok(S.DB.data.schema === 2, 'schema 1 migrates to 2');
+ok(S.DB.data.schema === 3, 'schema 1 migrates to 3');
 ok(S.DB.data.currentEmployee === 'Marcus', 'migration preserves the session');
 ok(!!S.FG().rolls && S.FG().rolls.length > 0, 'migration seeds the shared FloorGuard store');
 

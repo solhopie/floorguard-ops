@@ -16,6 +16,22 @@ The foundation. No business workflows yet.
 
 Static site — no build step, no network dependencies. Same proven pattern as the FloorGuard prototype.
 
+## Run 3 — Assign Inventory (v0.3.0)
+
+Connects work orders to actual warehouse inventory — no second database.
+
+- Assign Inventory module (`#/assign-inventory`, also accepts `?workOrder=XS024536`): tablet-first hub with NEEDS INVENTORY / ASSIGNED / COMPLETED tabs, work-order search (number, property, account, style, color, roll), scan/enter work order, filters (employee, property, material type, date)
+- Work order summary + material lines: style, color, material type, UOM, width, required quantity; line status NOT ASSIGNED / PARTIALLY ASSIGNED / ASSIGNED (derived from active reservations — never stored, can't drift)
+- Assign roll: existing scanner + roll search; roll card (ID, style, color, width, location, expected + measured balance, MB status, last measurement, last cut); unknown rolls → DISCOVER ROLL via the shared discovered-roll architecture
+- Compatibility check: style/color/width/material type → ✓ MATERIAL MATCH / MATERIAL DATA INCOMPLETE / ⚠ MATERIAL MISMATCH (mismatch never assigned silently — supervisor approval required)
+- Quantity check: required vs. expected balance → SUFFICIENT / INSUFFICIENT MATERIAL; reserved-across-all-jobs + informational "potential available"
+- Reservations: append-only inventory-assignment records (RESERVED / RELEASED / CONSUMED); reserving NEVER changes the trusted roll balance — only cuts do
+- Multi-WO on one roll: one roll entity, many assignments; over-reservation guard (total reserved > balance → supervisor confirmation)
+- Release: supervisor or assigning employee; record kept as history
+- Continue to Cut: assignment flows into the existing cut screen with WO/roll/required prefilled; roll barcode verification required before SAVE CUT (supervisor override for wrong roll); saving the cut consumes the reservation (RESERVED → CONSUMED)
+- Audit trail: INVENTORY_ASSIGNED / RELEASED / ROLL_VERIFIED / LOCATION_VERIFIED / OVER_RESERVATION_APPROVED / MATERIAL_MISMATCH_OVERRIDE / ASSIGNMENT_CONSUMED; visible on the work order (Inventory activity) and in the roll ledger (Assigned to Work Order)
+- Data: schema v3 (v2 → v3 migration adds assignment collections + material lines); demo orders XS024536 (Ventura Pointe, Marvel/Chrome, 19.75 LF) and XS024537; demo rolls 16628697 (86' 2") and 16628698
+
 ## Run 2 — Warehouse Consolidation (v0.2.0)
 
 The legacy standalone prototype's proven warehouse workflows now live here.
