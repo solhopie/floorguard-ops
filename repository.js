@@ -266,8 +266,15 @@ var Mappers = {
           requiredCount: l.required_count != null ? Number(l.required_count) : null
         };
       });
+    /* The WO detail screen renders flattened top-level material fields, so
+       mirror the first material line (same convention as the local v2->v3
+       migration). */
+    var first = ls[0] || {};
     return {
       id: w.id, number: w.number, property: w.property || '', account: w.account || '',
+      style: first.style || '', color: first.color || '', materialType: first.materialType || '',
+      uom: first.uom || 'LF', widthIn: first.widthIn || null,
+      quantity: first.requiredCount != null ? first.requiredCount : (first.requiredIn || 0),
       opStatus: w.status || 'OPEN',
       assignmentStatus: w.assignment_status || 'UNASSIGNED',
       assigneeId: w.assignee_id || null,

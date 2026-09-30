@@ -241,8 +241,23 @@ async function main() {
   ok(wo1.salesOrderId === sub.salesOrder.id && wo1.salesOrderLineId === sub.salesOrder.lines[0].id,
     'work order traces to sales order + line');
   ok(wo1.lines[0].requiredIn === 237 && wo1.lines[0].uom === 'LF', 'WO material line carries required inches');
+  ok(wo1.style === 'Marvel' && wo1.color === 'Chrome' && wo1.materialType === 'CARPET' &&
+     wo1.widthIn === 144 && wo1.quantity === 237 && wo1.uom === 'LF',
+    'generated WO flattens line fields to the top level for the detail header: ' +
+    wo1.style + '/' + wo1.color + '/' + wo1.widthIn + '/' + wo1.quantity);
   ok(L.scheduledJobs().some(function (w) { return w.id === wo1.id; }),
     'generated work order appears in Scheduled Jobs automatically');
+  /* IN PROGRESS tab filter: a released SO whose WO is still OPEN belongs in
+     RELEASED, not IN PROGRESS (tab key is 'IN PROGRESS' with a space). */
+  var soAfter1b = L.salesOrderById(sub.salesOrder.id);
+  ok(!L.salesOrdersByTab('IN PROGRESS').some(function (s) { return s.id === soAfter1b.id; }) &&
+     L.salesOrdersByTab('OPEN').some(function (s) { return s.id === soAfter1b.id; }),
+    'partially released SO with an OPEN WO is not listed in the IN PROGRESS tab');
+  L.DB.data.currentEmployee = 'Marcus';
+  wo1.opStatus = 'IN_PROGRESS';
+  ok(L.salesOrdersByTab('IN PROGRESS').some(function (s) { return s.id === soAfter1b.id; }),
+    'SO moves into the IN PROGRESS tab once its WO is in progress');
+  wo1.opStatus = 'OPEN';
   var jobs = (L.FG().workOrders || []).filter(function (w) { return w.salesOrderId === sub.salesOrder.id; });
   ok(jobs.length === 1, 'generated WO exists in the job pool');
   var soAfter1 = L.salesOrderById(sub.salesOrder.id);
@@ -385,6 +400,18 @@ async function main() {
   ok(W.salesOrderTabs().join(',') === 'OPEN,RELEASED,IN PROGRESS,COMPLETED',
     'sales order tabs match spec §13');
   ok(W.salesOrderById(seedSo.id).number === 'SO-100245', 'sales order detail resolves by id');
+
+  /* ================= J. shared hydration flattens material fields ================= */
+  var H2 = makeDevice();
+  var hyWo = H2.Mappers.rowToWorkOrder(
+    { id: 'WO-H', number: 'WO-9999', property: 'P', account: 'A', status: 'OPEN',
+      assignment_status: 'UNASSIGNED', scheduled_date: '2026-10-05' },
+    [{ id: 'WO-H-L1', work_order_id: 'WO-H', material_type: 'CARPET', style: 'Marvel',
+       color: 'Chrome', width_in: 144, required_in: 237, required_count: null }]);
+  ok(hyWo.style === 'Marvel' && hyWo.color === 'Chrome' && hyWo.materialType === 'CARPET' &&
+     hyWo.widthIn === 144 && hyWo.quantity === 237,
+    'shared-hydrated WO flattens the first material line to top-level fields');
+  ok(hyWo.lines.length === 1 && hyWo.lines[0].requiredIn === 237, 'hydrated WO keeps its material lines');
 
   console.log('\nrun6: ' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);

@@ -2970,13 +2970,14 @@ function getSalesOrdersLocal() {
 }
 function salesOrdersByTab(tab) {
   var all = getSalesOrdersLocal();
+  var key = String(tab || '').replace(/ /g, '_');
   return all.filter(function (so) {
     var st = salesOrderWarehouseStatus(so);
-    if (tab === 'OPEN') return st === SO_STATUS.OPEN || st === SO_STATUS.PARTIALLY_RELEASED;
-    if (tab === 'RELEASED') return st === SO_STATUS.RELEASED_TO_WAREHOUSE;
-    if (tab === 'IN_PROGRESS') return st === SO_STATUS.IN_PROGRESS;
-    if (tab === 'COMPLETED') return st === SO_STATUS.COMPLETED;
-    if (tab === 'ON_HOLD') return st === SO_STATUS.ON_HOLD;
+    if (key === 'OPEN') return st === SO_STATUS.OPEN || st === SO_STATUS.PARTIALLY_RELEASED;
+    if (key === 'RELEASED') return st === SO_STATUS.RELEASED_TO_WAREHOUSE;
+    if (key === 'IN_PROGRESS') return st === SO_STATUS.IN_PROGRESS;
+    if (key === 'COMPLETED') return st === SO_STATUS.COMPLETED;
+    if (key === 'ON_HOLD') return st === SO_STATUS.ON_HOLD;
     return true;
   });
 }
@@ -2991,6 +2992,10 @@ function buildWorkOrderFromLine(so, line) {
   return {
     id: rid('WO'), number: nextGeneratedWoNumber(),
     property: so.property, account: so.account,
+    /* Top-level material fields mirror the generated line: the WO detail
+       screen renders these, not lines[]. */
+    style: line.style, color: line.color, materialType: line.materialType,
+    uom: line.uom, widthIn: line.widthIn, quantity: line.warehouseQtyRequired || 0,
     opStatus: 'OPEN', assignmentStatus: 'UNASSIGNED', assigneeId: null,
     scheduledDate: so.scheduledDate || so.requestedDate || null, scheduledTime: null,
     priority: so.priority || 'NORMAL',
