@@ -10,9 +10,11 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 </head>
 <body>
+<div id="flash" aria-hidden="true"></div>
 <header id="topbar">
   <button id="hamburger" aria-label="Open navigation">&#9776;</button>
   <div id="tb-title">FLOORGUARD <span class="ops">OPS</span></div>
+  <span id="conn" class="conn" title="Connection status"><span class="dot"></span></span>
   <button id="empchip" class="empchip" aria-label="Switch employee"></button>
 </header>
 <div id="scrim" hidden></div>
@@ -22,9 +24,10 @@
     <div class="drawer-sub">Warehouse Operations</div>
   </div>
   <div id="drawer-nav"></div>
-  <div class="drawer-foot">v0.1.0 &middot; Run 1 Foundation</div>
+  <div class="drawer-foot">v0.2.0 &middot; Run 2 Consolidation</div>
 </nav>
 <main id="view"></main>
-<script src="app.js?v=1"></script>
+<script src="zxing.min.js?v=1"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>

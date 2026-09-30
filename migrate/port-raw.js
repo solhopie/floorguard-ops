@@ -1,943 +1,3 @@
-/* ============================================================
-   FLOORGUARD OPS — Run 1: application foundation + navigation
-   Static SPA, no build step, no network dependencies.
-   Storage: localStorage key "floorguard_ops_v1".
-   Later runs add modules under Screens + MODULE_INFO and store
-   their data in DB.ns('<module-key>') — the data layer seam.
-   ============================================================ */
-'use strict';
-
-/* ---------------- utilities ---------------- */
-function $(sel) { return document.querySelector(sel); }
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-  });
-}
-function todayStr() {
-  var d = new Date();
-  return (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
-}
-function daypart() {
-  var h = new Date().getHours();
-  if (h < 12) return 'morning';
-  if (h < 17) return 'afternoon';
-  return 'evening';
-}
-
-var APP_VERSION = '0.1.0';
-
-/* ---------------- data layer ----------------
-   One localStorage key, schema version, per-module namespaces.
-   Modules never touch each other's data: they read/write only
-   through DB.ns('<module-key>'). */
-var DB = {
-  KEY: 'floorguard_ops_v1',
-  SCHEMA: 2,
-  data: null,
-  seed: function () {
-    return {
-      schema: 2,
-      currentEmployee: null,
-      employees: ['Marcus', 'Dana', 'Luis'],
-      employeeRoles: { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' },
-      warehouses: [{ id: 'main', name: 'Main Warehouse' }],
-      currentWarehouse: 'main',
-      modules: {},       /* per-module namespaces, created on demand via DB.ns() */
-      settings: {}
-    };
-  },
-  load: function () {
-    try {
-      var raw = localStorage.getItem(this.KEY);
-      if (raw) {
-        var d = JSON.parse(raw);
-        if (d && d.schema === 2) { this.data = d; ensureFloorguardStore(); return; }
-        if (d && d.schema === 1) {
-          /* v1 -> v2: add warehouse context + roles, seed the shared
-             FloorGuard inventory store. Run 1 session data is kept. */
-          d.schema = 2;
-          if (!d.warehouses) d.warehouses = [{ id: 'main', name: 'Main Warehouse' }];
-          if (!d.currentWarehouse) d.currentWarehouse = 'main';
-          if (!d.employeeRoles) d.employeeRoles = { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' };
-          this.data = d;
-          ensureFloorguardStore();
-          this.save();
-          return;
-        }
-      }
-    } catch (e) { /* corrupted or unavailable storage -> reseed */ }
-    this.data = this.seed();
-    ensureFloorguardStore();
-    this.save();
-  },
-  save: function () {
-    try { localStorage.setItem(this.KEY, JSON.stringify(this.data)); } catch (e) {}
-  },
-  /* Isolated data area for one module. Created on demand. */
-  ns: function (name) {
-    if (!this.data.modules[name]) { this.data.modules[name] = {}; this.save(); }
-    return this.data.modules[name];
-  },
-  reset: function () { this.data = this.seed(); ensureFloorguardStore(); this.save(); }
-};
-
-/* ---------------- shared FloorGuard inventory store ----------------
-   ONE roll database for the whole product: Carpet Roll, Cut Transaction,
-   Cycle Count Session/Record, discovered rolls/locations, Documents
-   (history cards), and Work Orders. Ported from the legacy prototype's
-   tested seed; this store is now the source of truth. */
-function seedFloorguard() {
-  var now = Date.now();
-  var H = 3600 * 1000, D = 24 * H;
-  var at = function (msAgo) { return new Date(now - msAgo).toISOString(); };
-  return {
-    rolls: [
-      { id: 'QH5CPHN', barcode: 'QH5CPHN', manufacturer: 'Shaw Industries',
-        style: 'Venture Solid', color: 'Soft Taupe', widthIn: 144,
-        beginningIn: 1801, expectedLocation: '205B' },
-      { id: 'TK7M2QA', barcode: 'TK7M2QA', manufacturer: 'Mohawk Industries',
-        style: 'EverStrand Soft', color: 'Harbor Gray', widthIn: 144,
-        beginningIn: 1440, expectedLocation: '205A' },
-      { id: 'PL9XD4R', barcode: 'PL9XD4R', manufacturer: 'DreamWeaver',
-        style: 'Pure Earth', color: 'Desert Sand', widthIn: 180,
-        beginningIn: 1680, expectedLocation: '206B' },
-      { id: 'MN3KP8W', barcode: 'MN3KP8W', manufacturer: 'Shaw Industries',
-        style: 'Tuftex Nylon', color: 'Midnight Blue', widthIn: 144,
-        beginningIn: 1560, expectedLocation: '206A' },
-      { id: 'QW8ZV2N', barcode: 'QW8ZV2N', manufacturer: 'Phenix Flooring',
-        style: 'Karastan Wool', color: 'Ivory White', widthIn: 162,
-        beginningIn: 1320, expectedLocation: '204B' },
-      { id: 'ZX4LM7B', barcode: 'ZX4LM7B', manufacturer: 'Stanton Carpet',
-        style: 'Atelier Wool', color: 'Charcoal', widthIn: 144,
-        beginningIn: 1200, expectedLocation: '204A' }
-    ],
-    discovered: [],   /* { id, raw, firstSeenAt, firstSeenBy, lastLocation,
-                          lastMeasuredIn, lastMeasuredAt, lastMeasuredBy, count } */
-    cuts: [
-      { id: 'K1', rollId: 'QH5CPHN', barcode: 'QH5CPHN', order: 'XS024531', inches: 323, prevIn: 1801, newIn: 1478, location: '205B', at: at(3 * D + 5 * H), by: 'Marcus' },
-      { id: 'K2', rollId: 'QH5CPHN', barcode: 'QH5CPHN', order: 'XS024532', inches: 444, prevIn: 1478, newIn: 1034, location: '205B', at: at(2 * D + 3 * H), by: 'Dana' },
-      { id: 'K3', rollId: 'QH5CPHN', barcode: 'QH5CPHN', order: 'XS024536', inches: 498, prevIn: 1034, newIn: 536, location: '205B', at: at(1 * D + 6 * H), by: 'Marcus' },
-      { id: 'K4', rollId: 'TK7M2QA', barcode: 'TK7M2QA', order: 'XS024540', inches: 200, prevIn: 1440, newIn: 1240, location: '205A', at: at(2 * D + 8 * H), by: 'Dana' },
-      { id: 'K5', rollId: 'PL9XD4R', barcode: 'PL9XD4R', order: 'XS024541', inches: 360, prevIn: 1680, newIn: 1320, location: '206B', at: at(4 * D + 2 * H), by: 'Luis' },
-      { id: 'K6', rollId: 'QW8ZV2N', barcode: 'QW8ZV2N', order: 'XS024544', inches: 120, prevIn: 1320, newIn: 1200, location: '204B', at: at(5 * D + 4 * H), by: 'Marcus' }
-    ],
-    counts: [
-      { id: 'C-SEED-1', rollId: 'QH5CPHN', style: 'Venture Solid', color: 'Soft Taupe',
-        widthIn: 144, expectedLocation: '205B', scannedLocation: '205B',
-        expectedIn: 536, physicalIn: 533, diffIn: -3,
-        employee: 'Marcus', at: at(2 * H), status: 'SHORT', flagged: false, measured: true },
-      { id: 'C-SEED-2', rollId: 'TK7M2QA', style: 'EverStrand Soft', color: 'Harbor Gray',
-        widthIn: 144, expectedLocation: '205A', scannedLocation: '205A',
-        expectedIn: 1240, physicalIn: 1240, diffIn: 0,
-        employee: 'Dana', at: at(5 * H), status: 'MATCH', flagged: false, measured: true },
-      { id: 'C-SEED-3', rollId: 'TK7M2QA', style: 'EverStrand Soft', color: 'Harbor Gray',
-        widthIn: 144, expectedLocation: '205A', scannedLocation: '205A',
-        expectedIn: 1240, physicalIn: 1240, diffIn: 0,
-        employee: 'Luis', at: at(0.5 * H), status: 'MATCH', flagged: false, measured: true },
-      { id: 'C-SEED-4', rollId: 'PL9XD4R', style: 'Pure Earth', color: 'Desert Sand',
-        widthIn: 180, expectedLocation: '206B', scannedLocation: '206B',
-        expectedIn: 1320, physicalIn: 1350, diffIn: 30,
-        employee: 'Luis', at: at(3 * H), status: 'OVER', flagged: false, measured: true },
-      { id: 'C-SEED-5', rollId: 'MN3KP8W', style: 'Tuftex Nylon', color: 'Midnight Blue',
-        widthIn: 144, expectedLocation: '206A', scannedLocation: '206B',
-        expectedIn: 1560, physicalIn: 1560, diffIn: 0,
-        employee: 'Dana', at: at(1 * H), status: 'LOCATION_MISMATCH', flagged: false, measured: true },
-      { id: 'C-SEED-6', rollId: 'QW8ZV2N', style: 'Karastan Wool', color: 'Ivory White',
-        widthIn: 162, expectedLocation: '204B', scannedLocation: '204A',
-        expectedIn: 1200, physicalIn: 1190, diffIn: -10,
-        employee: 'Marcus', at: at(0.75 * H), status: 'NEEDS_REVIEW', flagged: true, measured: true }
-    ],
-    freeSessions: [],  /* { id, startedAt, startedBy, warehouse, endedAt } */
-    freeCounts: [],    /* { id, sessionId, rollId, barcode, raw, discovered, location,
-                           measuredFt, measuredInch, physicalIn, expectedIn (null when unknown),
-                           status: 'COLLECTED', measured: true, employee, at, date, time } */
-    documents: [],     /* history-card captures: { id, rollId, barcode, raw, discovered,
-                           kind: 'HISTORY_CARD', docType, image, thumb, employee, at,
-                           date, time, location, source: 'PAPER CARD', num, imports: [] } */
-    workOrders: [
-      { id: 'WO-1001', number: 'WO-1001', property: 'Maple St Residence', account: 'Acme Flooring Co',
-        style: 'Venture Solid', color: 'Soft Taupe', materialType: 'Carpet', uom: 'LF',
-        widthIn: 144, quantity: 850, rollId: 'QH5CPHN', assigneeId: 'e1',
-        opStatus: 'IN_PROGRESS', createdAt: at(6 * D) },
-      { id: 'WO-1002', number: 'WO-1002', property: 'Oak Ave Residence', account: 'Acme Flooring Co',
-        style: 'EverStrand Soft', color: 'Harbor Gray', materialType: 'Carpet', uom: 'LF',
-        widthIn: 144, quantity: 620, rollId: 'TK7M2QA', assigneeId: null,
-        opStatus: 'OPEN', createdAt: at(5 * D) },
-      { id: 'WO-1003', number: 'WO-1003', property: 'Pine Rd Residence', account: 'HomeStyle Interiors',
-        style: 'Pure Earth', color: 'Desert Sand', materialType: 'Carpet', uom: 'LF',
-        widthIn: 180, quantity: 400, rollId: null, assigneeId: 'e2',
-        opStatus: 'OPEN', createdAt: at(4 * D) },
-      { id: 'WO-1004', number: 'WO-1004', property: 'Cedar Ln Residence', account: 'Acme Flooring Co',
-        style: 'Tuftex Nylon', color: 'Midnight Blue', materialType: 'Carpet', uom: 'LF',
-        widthIn: 144, quantity: 300, rollId: null, assigneeId: null,
-        opStatus: 'OPEN', createdAt: at(3 * D) }
-    ]
-  };
-}
-
-/* The single FloorGuard inventory store. Every roll/cut/count/document/
-   work-order read and write goes through here — no duplicate databases. */
-function FG() { return DB.ns('floorguard'); }
-
-function ensureFloorguardStore() {
-  if (!DB.data.modules['floorguard']) {
-    DB.data.modules['floorguard'] = seedFloorguard();
-    DB.save();
-  }
-}
-
-/* Reseed ONLY the inventory store (demo data). Session, employees,
-   warehouse context, and other module namespaces are untouched. */
-function FGReset() {
-  DB.data.modules['floorguard'] = seedFloorguard();
-  DB.save();
-}
-
-/* ---------------- navigation structure ----------------
-   Single source of truth for the drawer, dashboard tiles,
-   and route titles. Run N adds an item here + a Screens entry. */
-var NAV = [
-  { group: 'DASHBOARD', items: [
-    { route: 'dashboard', label: 'Dashboard', icon: '🏠' }
-  ] },
-  { group: 'WAREHOUSE', items: [
-    { route: 'work-orders',       label: 'Work Orders',       icon: '🧾' },
-    { route: 'sales-orders',      label: 'Sales Orders',      icon: '📦' },
-    { route: 'assign-inventory',  label: 'Assign Inventory',  icon: '🗂️' },
-    { route: 'cut-roll-tracking', label: 'Cut / Roll Tracking', icon: '✂️' },
-    { route: 'cycle-count',       label: 'Cycle Count',       icon: '🔄' },
-    { route: 'balance',           label: 'Balance',           icon: '⚖️' },
-    { route: 'history',           label: 'History',           icon: '📜' }
-  ] },
-  { group: 'OPERATIONS', items: [
-    { route: 'scheduled-jobs', label: 'Scheduled Jobs',    icon: '🗓️' },
-    { route: 'returns',        label: 'Returns',           icon: '↩️' },
-    { route: 'qa-warranty',    label: 'QA Request / Warranty', icon: '🛡️' },
-    { route: 'reports',        label: 'Reports',           icon: '📊' }
-  ] },
-  { group: 'BUSINESS', items: [
-    { route: 'near-me',  label: 'Near Me',  icon: '📍' },
-    { route: 'order',    label: 'Order',    icon: '🛒' },
-    { route: 'account',  label: 'Account',  icon: '👤' },
-    { route: 'pricing',  label: 'Pricing',  icon: '💲' },
-    { route: 'gallery',  label: 'Gallery',  icon: '🖼️' },
-    { route: 'contact',  label: 'Contact',  icon: '📞' }
-  ] },
-  { group: 'SYSTEM', items: [
-    { route: 'settings',  label: 'Settings', icon: '⚙️' },
-    { route: '__logout',  label: 'Logout',   icon: '🚪' }
-  ] }
-];
-
-/* What each future module will contain. Shown on the Run 1
-   placeholder screens so the roadmap is visible in the app. */
-var MODULE_INFO = {
-  'work-orders':       { icon: '🧾', title: 'Work Orders',
-    points: ['Work order queue and status', 'Assign work to the team', 'Track progress through the shift'] },
-  'sales-orders':      { icon: '📦', title: 'Sales Orders',
-    points: ['Sales order list', 'Order details and line items', 'Fulfillment status'] },
-  'assign-inventory':  { icon: '🗂️', title: 'Assign Inventory',
-    points: ['Assign rolls to work and sales orders', 'Reservation tracking', 'Release unneeded reservations'] },
-  'cut-roll-tracking': { icon: '✂️', title: 'Cut / Roll Tracking',
-    points: ['Scan Roll', 'Current Balance', 'Work Order', 'Cut amount', 'Permanent cut history per roll'] },
-  'cycle-count':       { icon: '🔄', title: 'Cycle Count',
-    points: ['Standard Cycle Count', 'Free Run / Discovery Mode', 'Rapid Cycle Count',
-             'Location scanning', 'Roll scanning', 'Measured Balance',
-             'History Card Capture', 'Discrepancy Review'] },
-  'balance':           { icon: '⚖️', title: 'Balance',
-    points: ['Roll balances at a glance', 'Expected vs measured comparison', 'Balance history'] },
-  'history':           { icon: '📜', title: 'History',
-    points: ['Roll history timeline', 'History-card documents', 'Audit trail'] },
-  'scheduled-jobs':    { icon: '🗓️', title: 'Scheduled Jobs',
-    points: ['Job schedule for the warehouse', 'Upcoming counts and cuts', 'Job assignments'] },
-  'returns':           { icon: '↩️', title: 'Returns',
-    points: ['Return requests', 'Inspection flow', 'Return disposition'] },
-  'qa-warranty':       { icon: '🛡️', title: 'QA Request / Warranty',
-    points: ['QA requests', 'Warranty claims', 'Claim status tracking'] },
-  'reports':           { icon: '📊', title: 'Reports',
-    points: ['Supervisor reports', 'Count and cut summaries', 'CSV / PDF exports'] },
-  'near-me':           { icon: '📍', title: 'Near Me',
-    points: ['Nearby warehouses and stores', 'Directions and contact'] },
-  'order':             { icon: '🛒', title: 'Order',
-    points: ['Place a material order', 'Order status'] },
-  'account':           { icon: '👤', title: 'Account',
-    points: ['Account details', 'Company profile'] },
-  'pricing':           { icon: '💲', title: 'Pricing',
-    points: ['Price lists', 'Product pricing'] },
-  'gallery':           { icon: '🖼️', title: 'Gallery',
-    points: ['Product gallery', 'Material photos'] },
-  'contact':           { icon: '📞', title: 'Contact',
-    points: ['Contact information', 'Support'] },
-  'settings':          { icon: '⚙️', title: 'Settings', points: [] }
-};
-
-function navLabel(route) {
-  for (var g = 0; g < NAV.length; g++) {
-    var items = NAV[g].items;
-    for (var i = 0; i < items.length; i++) {
-      if (items[i].route === route) return items[i].label;
-    }
-  }
-  return 'FloorGuard Ops';
-}
-
-/* ---------------- slide-out drawer ---------------- */
-function drawerHtml() {
-  var html = '';
-  NAV.forEach(function (g) {
-    html += '<div class="dgroup"><div class="dgroup-label">' + esc(g.group) + '</div>';
-    g.items.forEach(function (it) {
-      html += '<button class="ditem" data-route="' + esc(it.route) + '">' +
-              '<span class="dicon">' + it.icon + '</span>' +
-              '<span class="dlabel">' + esc(it.label) + '</span></button>';
-    });
-    html += '</div>';
-  });
-  return html;
-}
-
-function renderDrawer() {
-  var nav = $('#drawer-nav');
-  nav.innerHTML = drawerHtml();
-  var btns = nav.querySelectorAll('.ditem');
-  for (var i = 0; i < btns.length; i++) {
-    (function (b) {
-      b.onclick = function () {
-        var r = b.getAttribute('data-route');
-        if (r === '__logout') { doLogout(); return; }
-        closeDrawer();
-        go(r);
-      };
-    })(btns[i]);
-  }
-}
-
-function openDrawer() {
-  $('#drawer').classList.add('open');
-  var scrim = $('#scrim');
-  scrim.hidden = false;
-}
-function closeDrawer() {
-  $('#drawer').classList.remove('open');
-  $('#scrim').hidden = true;
-}
-function markActiveNav(route) {
-  var nav = $('#drawer-nav');
-  if (!nav || !nav.querySelectorAll) return;
-  var btns = nav.querySelectorAll('.ditem');
-  for (var i = 0; i < btns.length; i++) {
-    var b = btns[i];
-    if (b.getAttribute('data-route') === route) b.classList.add('active');
-    else b.classList.remove('active');
-  }
-}
-
-/* ---------------- session ----------------
-   Session = the signed-in employee, persisted in DB.
-   Every route except sign-in requires a session. */
-function needsSignin() { return !DB.data.currentEmployee; }
-
-function setEmployee(name) {
-  name = String(name || '').trim();
-  if (!name) return;
-  if (DB.data.employees.indexOf(name) < 0) DB.data.employees.push(name);
-  DB.data.currentEmployee = name;
-  DB.save();
-  toast('Signed in as ' + name);
-  go('dashboard');
-}
-
-function doLogout() {
-  DB.data.currentEmployee = null;
-  DB.save();
-  closeDrawer();
-  go('signin');
-}
-
-/* ---------------- router ---------------- */
-function parseHash() {
-  var h = (typeof window !== 'undefined' && window.location && window.location.hash) || '';
-  var m = h.match(/^#\/(.+)$/);
-  return m ? m[1] : 'dashboard';
-}
-/* Longest-prefix match of a hash path against registered screen keys, so
-   param routes like 'roll/QH5CPHN' resolve to the 'roll' screen. */
-function matchRoute(path) {
-  var keys = Object.keys(Screens).sort(function (a, b) { return b.length - a.length; });
-  for (var i = 0; i < keys.length; i++) {
-    var k = keys[i];
-    if (path === k) return k;
-    if (path.indexOf(k + '/') === 0) return k;
-  }
-  return null;
-}
-function routeParam(path, name) {
-  if (path === name) return '';
-  if (path.indexOf(name + '/') === 0) return decodeURIComponent(path.slice(name.length + 1));
-  return '';
-}
-function go(route, param) {
-  window.location.hash = '#/' + route + (param ? '/' + encodeURIComponent(param) : '');
-}
-function resolveRoute(r) {
-  if (r === 'signin') return 'signin';
-  if (needsSignin()) return 'signin';
-  var hit = matchRoute(r);
-  if (hit) return hit;
-  return 'dashboard';
-}
-function updateTopbar(route) {
-  document.body.classList.toggle('nosession', needsSignin());
-  var chip = $('#empchip');
-  var emp = DB.data.currentEmployee || '';
-  var role = emp && DB.data.employeeRoles ? DB.data.employeeRoles[emp] : '';
-  chip.textContent = emp + (role ? ' · ' + role : '');
-  var wh = (DB.data.warehouses || []).filter(function (w) { return w.id === DB.data.currentWarehouse; })[0];
-  var title = $('#tb-title');
-  title.innerHTML = 'FLOORGUARD <span class="ops">OPS</span>' +
-    (wh ? ' <span class="wh">' + esc(wh.name) + '</span>' : '');
-  updateConn();
-}
-/* Connection indicator: online/offline state for the tablet. */
-function updateConn() {
-  var el = $('#conn');
-  if (!el) return;
-  var online = (typeof navigator === 'undefined') ? true : navigator.onLine !== false;
-  el.classList.toggle('off', !online);
-  el.title = online ? 'Online' : 'Offline — changes are saved on this device';
-}
-if (typeof window !== 'undefined') {
-  window.addEventListener('online', updateConn);
-  window.addEventListener('offline', updateConn);
-}
-function render() {
-  closeDrawer();
-  /* Never leave the camera running between screens. */
-  if (typeof Scanner !== 'undefined' && Scanner.stop) Scanner.stop();
-  var path = parseHash();
-  var r = resolveRoute(path);
-  var param = routeParam(path, r);
-  var s = Screens[r](param);
-  $('#view').innerHTML = s.html;
-  updateTopbar(r);
-  markActiveNav(r);
-  if (s.mount) s.mount();
-  if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo(0, 0);
-}
-
-/* ---------------- shared components ---------------- */
-function pageHead(title, sub) {
-  return '<div class="step-head"><h1>' + title + '</h1>' +
-         (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>';
-}
-
-function toast(msg) {
-  var old = document.getElementById('toast');
-  if (old) old.remove();
-  var t = document.createElement('div');
-  t.id = 'toast';
-  t.textContent = msg;
-  document.body.appendChild(t);
-  setTimeout(function () { var x = document.getElementById('toast'); if (x) x.remove(); }, 2200);
-}
-
-/* In-app confirm modal (never the native confirm()).
-   Returns a Promise<boolean>; opts.onOk is still called for legacy callers. */
-function showConfirm(opts) {
-  return new Promise(function (resolve) {
-    var wrap = document.createElement('div');
-    wrap.className = 'modal-wrap';
-    wrap.innerHTML =
-      '<div class="modal" role="dialog" aria-modal="true">' +
-      '<h2>' + esc(opts.title || 'Are you sure?') + '</h2>' +
-      '<p>' + esc(opts.body || '') + '</p>' +
-      '<button class="btn btn-primary" id="mc-ok">' + esc(opts.okLabel || 'CONFIRM') + '</button>' +
-      '<button class="btn" id="mc-cancel">' + esc(opts.cancelLabel || 'CANCEL') + '</button>' +
-      '</div>';
-    document.body.appendChild(wrap);
-    function close(v) { wrap.remove(); resolve(v); }
-    wrap.querySelector('#mc-ok').onclick = function () { close(true); if (opts.onOk) opts.onOk(); };
-    wrap.querySelector('#mc-cancel').onclick = function () { close(false); };
-    wrap.onclick = function (e) { if (e.target === wrap) close(false); };
-  });
-}
-
-/* Placeholder screen for modules arriving in later runs. */
-function moduleScreen(key) {
-  var info = MODULE_INFO[key];
-  var points = info.points.map(function (p) {
-    return '<div class="pli"><span class="pdot">▸</span><span>' + esc(p) + '</span></div>';
-  }).join('');
-  return {
-    html:
-      '<div class="screen">' +
-      pageHead(info.icon + ' ' + esc(info.title), 'Warehouse module') +
-      '<div class="card placeholder">' +
-      '<div class="ph-icon">' + info.icon + '</div>' +
-      '<div class="ph-title">' + esc(info.title) + '</div>' +
-      '<div class="ph-sub">Arriving in a later run. The foundation is ready — ' +
-      'this module&rsquo;s data area <span class="mono">modules.' + esc(key) + '</span> is reserved.</div>' +
-      '<div class="ph-list">' + points + '</div>' +
-      '</div>' +
-      '<button class="btn" id="ph-back">← DASHBOARD</button>' +
-      '</div>',
-    mount: function () {
-      $('#ph-back').onclick = function () { go('dashboard'); };
-    }
-  };
-}
-
-/* ---------------- screens ---------------- */
-var Screens = {};
-
-Screens.signin = function () {
-  var switching = !!DB.data.currentEmployee;
-  var btns = DB.data.employees.map(function (e) {
-    var initial = esc(e.trim().charAt(0).toUpperCase() || '?');
-    return '<button class="btn empbtn" data-emp="' + esc(e) + '">' +
-           '<span class="avatar">' + initial + '</span>' +
-           '<span>' + esc(e) + '</span></button>';
-  }).join('');
-  return {
-    html:
-      '<div class="screen" style="max-width:560px">' +
-      '<div class="signin-hero">' +
-      '<div class="brand">FLOORGUARD <span class="ops">OPS</span></div>' +
-      '<div class="tag">Warehouse Operations Platform</div>' +
-      '</div>' +
-      pageHead(switching ? 'Switch employee' : 'Who is working?', switching ? '' : 'Tap your name to sign in.') +
-      '<div id="s-empbtns">' + btns + '</div>' +
-      '<div class="sect">NEW EMPLOYEE</div>' +
-      '<form id="s-addform">' +
-      '<label class="f" for="s-newname">Name</label>' +
-      '<input type="text" id="s-newname" autocomplete="off" placeholder="e.g. Marcus">' +
-      '<button class="btn btn-primary" type="submit">ADD &amp; SIGN IN</button>' +
-      '</form>' +
-      '</div>',
-    mount: function () {
-      var list = document.querySelectorAll('#s-empbtns .empbtn');
-      for (var i = 0; i < list.length; i++) {
-        (function (b) {
-          b.onclick = function () { setEmployee(b.getAttribute('data-emp')); };
-        })(list[i]);
-      }
-      $('#s-addform').onsubmit = function (e) {
-        e.preventDefault();
-        var v = $('#s-newname').value;
-        if (v && v.trim()) setEmployee(v);
-      };
-    }
-  };
-};
-
-Screens.dashboard = function () {
-  function tiles(keys) {
-    return '<div class="tiles">' + keys.map(function (k) {
-      var info = MODULE_INFO[k];
-      return '<button class="tile" data-route="' + esc(k) + '">' +
-             '<span class="ticon">' + info.icon + '</span>' +
-             '<span>' + esc(info.title) + '</span></button>';
-    }).join('') + '</div>';
-  }
-  var wh = ['work-orders', 'sales-orders', 'assign-inventory', 'cut-roll-tracking',
-            'cycle-count', 'balance', 'history'];
-  var ops = ['scheduled-jobs', 'returns', 'qa-warranty', 'reports'];
-  return {
-    html:
-      '<div class="screen">' +
-      pageHead('Good ' + daypart() + ', ' + esc(DB.data.currentEmployee || 'team') + '.',
-               todayStr() + ' · FloorGuard Ops') +
-      '<div class="sect">WAREHOUSE</div>' + tiles(wh) +
-      '<div class="sect">OPERATIONS</div>' + tiles(ops) +
-      '<div class="sect">SESSION</div>' +
-      '<div class="card">' +
-      '<div class="kv"><span class="k">Signed in as</span><span><strong>' +
-        esc(DB.data.currentEmployee || '—') + '</strong></span></div>' +
-      '<div class="kv"><span class="k">App version</span><span class="num">' + esc(APP_VERSION) + '</span></div>' +
-      '<div class="kv"><span class="k">Storage</span><span class="mono">' + esc(DB.KEY) + '</span></div>' +
-      '</div>' +
-      '</div>',
-    mount: function () {
-      var ts = document.querySelectorAll('.tile');
-      for (var i = 0; i < ts.length; i++) {
-        (function (b) {
-          b.onclick = function () { go(b.getAttribute('data-route')); };
-        })(ts[i]);
-      }
-    }
-  };
-};
-
-Screens.settings = function () {
-  var emps = DB.data.employees.map(function (e) {
-    var you = (e === DB.data.currentEmployee) ? ' <span class="chip">YOU</span>' : '';
-    return '<div class="kv"><span class="k">' + esc(e) + '</span><span>' + you + '</span></div>';
-  }).join('');
-  return {
-    html:
-      '<div class="screen">' +
-      pageHead('⚙️ Settings', 'App and session') +
-      '<div class="card"><h2>Session</h2>' +
-      '<div class="kv"><span class="k">Signed in as</span><span><strong>' +
-        esc(DB.data.currentEmployee || '—') + '</strong></span></div>' +
-      '<button class="btn" id="set-switch" style="margin-top:14px">SWITCH EMPLOYEE</button>' +
-      '<button class="btn" id="set-logout">SIGN OUT</button>' +
-      '</div>' +
-      '<div class="card"><h2>Employees on this device</h2>' + emps +
-      '<form id="set-addform" style="margin-top:14px">' +
-      '<label class="f" for="set-newname">Add employee</label>' +
-      '<input type="text" id="set-newname" autocomplete="off" placeholder="Name">' +
-      '<button class="btn btn-primary" type="submit">ADD EMPLOYEE</button>' +
-      '</form></div>' +
-      '<div class="card"><h2>About</h2>' +
-      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 1)</span></div>' +
-      '<div class="kv"><span class="k">Storage key</span><span class="mono">' + esc(DB.KEY) + '</span></div>' +
-      '<div class="kv"><span class="k">Schema</span><span class="num">v' + DB.SCHEMA + '</span></div>' +
-      '</div>' +
-      '<div class="card"><h2>Demo data</h2>' +
-      '<button class="btn btn-danger" id="set-reset">RESET DEMO DATA</button>' +
-      '</div>' +
-      '</div>',
-    mount: function () {
-      $('#set-switch').onclick = function () { go('signin'); };
-      $('#set-logout').onclick = doLogout;
-      $('#set-addform').onsubmit = function (e) {
-        e.preventDefault();
-        var v = $('#set-newname').value;
-        if (v && v.trim() && DB.data.employees.indexOf(v.trim()) < 0) {
-          DB.data.employees.push(v.trim());
-          DB.save();
-          toast('Added ' + v.trim());
-          render();
-        }
-      };
-      $('#set-reset').onclick = function () {
-        showConfirm({
-          title: 'Reset demo data?',
-          body: 'This clears employees, the session, and all module data on this device.',
-          okLabel: 'RESET',
-          onOk: function () { DB.reset(); go('signin'); }
-        });
-      };
-    }
-  };
-};
-
-/* Register a placeholder screen for every future module. */
-Object.keys(MODULE_INFO).forEach(function (k) {
-  if (k === 'settings') return; /* settings is a real screen above */
-  Screens[k] = function () { return moduleScreen(k); };
-});
-
-/* ======================================================================
-   RUN 2 (consolidation): module hubs + Work Orders + Balance.
-   Hand-authored for the Ops shell; they drive the ported warehouse core.
-   ====================================================================== */
-
-/* ---------------- CYCLE COUNT hub ---------------- */
-Screens['cycle-count'] = function () {
-  var disc = discrepancyRolls().length;
-  var html =
-    '<div class="screen">' +
-    pageHead('🔄 Cycle Count', 'Free Run · Rapid · Verified') +
-    '<button class="btn btn-free btn-huge" id="cc-free">🆓 FREE RUN CYCLE COUNT<br><span class="btn-sub">DISCOVERY MODE — any location, any roll</span></button>' +
-    '<button class="btn btn-huge" id="cc-rapid">⚡ RAPID CYCLE COUNT<br><span class="btn-sub">scan location once, then roll after roll</span></button>' +
-    '<button class="btn btn-primary btn-huge" id="cc-std">▶ STANDARD / VERIFIED COUNT<br><span class="btn-sub">compare against system inventory</span></button>' +
-    '<button class="btn btn-huge" id="cc-sess">📋 COUNT SESSIONS</button>' +
-    '<button class="btn btn-huge" id="cc-rev">⚠️ ITEMS REQUIRING REVIEW' +
-      (disc ? ' <span class="count-badge">' + disc + '</span>' : '') + '</button>' +
-    '<p class="hint">Free Run collects physical reality with no preloaded inventory. ' +
-    'Standard mode compares against expected locations and balances.</p>' +
-    '</div>';
-  return { html: html, mount: function () {
-    $('#cc-free').onclick = function () { newFreeRun(); go('count/free/loc'); };
-    $('#cc-rapid').onclick = function () { newRapid(); go('count/rapid/loc'); };
-    $('#cc-std').onclick = function () { newSession(); go('count/standard'); };
-    $('#cc-sess').onclick = function () { go('count/sessions'); };
-    $('#cc-rev').onclick = function () { go('count/review'); };
-  }};
-};
-
-/* ---------------- CUT / ROLL TRACKING hub ---------------- */
-Screens['cut-roll-tracking'] = function () {
-  var cuts = FG().cuts.slice().sort(function (a, b) { return new Date(b.at) - new Date(a.at); }).slice(0, 8);
-  var rows = cuts.map(function (c) {
-    return '<button class="rowbtn" data-roll="' + esc(c.rollId) + '">' +
-      '<div class="rhead"><b class="mono">' + esc(c.rollId) + '</b>' +
-      ' <span class="sub">cut <b class="num">' + fmtLen(c.inches) + '</b></span></div>' +
-      '<div class="sub">' + (c.order ? 'Order <b class="mono">' + esc(c.order) + '</b> &middot; ' : '') +
-      esc(c.by) + ' &middot; ' + fmtDT(c.at) + '</div></button>';
-  }).join('');
-  var html =
-    '<div class="screen">' +
-    pageHead('✂️ Cut / Roll Tracking', 'Scan · balance · cut · history') +
-    '<button class="btn btn-primary btn-huge" id="crt-cut">📷 SCAN ROLL TO CUT</button>' +
-    '<button class="btn btn-huge" id="crt-view">🔍 SCAN ROLL TO VIEW</button>' +
-    '<button class="btn btn-huge" id="crt-search">⌨️ SEARCH ROLL</button>' +
-    '<h2>Recent cuts</h2>' +
-    (rows || '<p class="hint">No cuts recorded yet.</p>') +
-    '</div>';
-  return { html: html, mount: function () {
-    $('#crt-cut').onclick = function () { newCutSession(); go('cut/scan'); };
-    $('#crt-view').onclick = function () { go('rolls/scan'); };
-    $('#crt-search').onclick = function () { go('rolls/search'); };
-    Array.prototype.forEach.call(document.querySelectorAll('[data-roll]'), function (b) {
-      b.onclick = function () { go('roll', b.getAttribute('data-roll')); };
-    });
-  }};
-};
-
-/* Generic "scan a roll, then open it" used by the Cut/Roll hub. */
-Screens['rolls/scan'] = function () {
-  var html =
-    '<div class="screen">' +
-    '<div class="step-head">SCAN ROLL</div>' +
-    '<h1>Scan a roll</h1>' +
-    '<div class="cambox" id="cambox"></div>' +
-    '<div id="result"></div>' +
-    '<div class="card"><div class="label">TYPE THE BARCODE</div>' +
-    '<form id="manualform"><div class="field"><input class="input mono" id="manual" autocomplete="off" autocapitalize="characters" placeholder="e.g. QH5CPHN"></div>' +
-    '<button class="btn btn-primary" type="submit">FIND ROLL</button></form></div>' +
-    '</div>';
-  return { html: html, mount: function () {
-    mountScannerBox('cambox', onCode);
-    $('#manualform').onsubmit = function (e) { e.preventDefault(); onCode($('#manual').value); };
-  }};
-  function onCode(code) {
-    var norm = normalizeBarcode(code);
-    if (!norm) { bad(); return; }
-    var roll = rollByBarcode(norm);
-    if (roll) { good(); go('roll', roll.id); return; }
-    var d = findDiscovered(norm);
-    if (d) { good(); go('disc', d.id); return; }
-    bad();
-    $('#result').innerHTML = '<div class="err center">&#10060; ROLL NOT FOUND<br>' +
-      '<span style="font-size:1rem">"' + esc(norm) + '" is not in the system.</span></div>' +
-      '<button class="btn btn-free" id="todisc">🆓 OPEN IN FREE RUN (DISCOVERY)</button>';
-    $('#todisc').onclick = function () { newFreeRun(); go('count/free/loc'); };
-  }
-};
-
-/* ---------------- BALANCE ---------------- */
-Screens['balance'] = function () {
-  var rows = FG().rolls.map(function (r) {
-    var exp = systemBalance(r.id);
-    var meas = (r.measuredIn != null) ? fmtLen(r.measuredIn) : '—';
-    var diff = (r.measuredIn != null) ? fmtDiff(r.measuredIn - exp) : '—';
-    var dcls = (r.measuredIn != null) ? diffCls(r.measuredIn - exp) : '';
-    return '<button class="rowbtn" data-roll="' + esc(r.id) + '">' +
-      '<div class="rhead"><b class="mono">' + esc(r.id) + '</b>' +
-      (r.measuredIn != null ? ' <span class="stchip st-green">MB ✓</span>' : '') + '</div>' +
-      '<div class="sub">' + esc(r.style) + ' &middot; ' + esc(r.color) + ' &middot; loc <b class="mono">' + esc(r.expectedLocation) + '</b></div>' +
-      '<div class="sub num">Exp <b>' + fmtLen(exp) + '</b> &middot; Meas <b>' + meas + '</b>' +
-      ' &middot; Diff <b class="' + dcls + '">' + diff + '</b></div></button>';
-  }).join('');
-  return {
-    html:
-      '<div class="screen">' +
-      pageHead('⚖️ Balance', 'Expected vs measured per roll') +
-      (rows || '<p class="hint">No rolls in the system.</p>') +
-      '</div>',
-    mount: function () {
-      Array.prototype.forEach.call(document.querySelectorAll('[data-roll]'), function (b) {
-        b.onclick = function () { go('roll', b.getAttribute('data-roll')); };
-      });
-    }
-  };
-};
-
-/* ---------------- WORK ORDERS ---------------- */
-function woById(id) {
-  return (FG().workOrders || []).filter(function (w) { return w.id === id; })[0] || null;
-}
-function woAssigneeName(w) {
-  if (!w.assigneeId) return null;
-  var m = /^e(\d+)$/.exec(w.assigneeId || '');
-  var n = m ? DB.data.employees[parseInt(m[1], 10) - 1] : null;
-  return n || w.assigneeId;
-}
-function woAssignChip(w) {
-  var nm = woAssigneeName(w);
-  return nm
-    ? '<span class="stchip st-green">ASSIGNED' + ' \u00b7 ' + esc(nm) + '</span>'
-    : '<span class="stchip st-yellow">UNASSIGNED</span>';
-}
-function woStatusChip(w) {
-  var cls = w.opStatus === 'COMPLETE' ? 'st-green' : (w.opStatus === 'IN_PROGRESS' ? 'st-blue' : 'st-gray');
-  return '<span class="stchip ' + cls + '">' + esc(w.opStatus) + '</span>';
-}
-
-Screens['work-orders'] = function (param) {
-  var tab = (param || 'ALL').toUpperCase();
-  if (['ALL', 'ASSIGNED', 'UNASSIGNED'].indexOf(tab) < 0) tab = 'ALL';
-  var list = (FG().workOrders || []).filter(function (w) {
-    if (tab === 'ASSIGNED') return !!w.assigneeId;
-    if (tab === 'UNASSIGNED') return !w.assigneeId;
-    return true;
-  });
-  var tabs = ['ALL', 'ASSIGNED', 'UNASSIGNED'].map(function (t) {
-    return '<button class="fchip' + (t === tab ? ' on' : '') + '" data-tab="' + t + '">' + t + '</button>';
-  }).join('');
-  var rows = list.map(function (w) {
-    return '<button class="rowbtn" data-wo="' + esc(w.id) + '">' +
-      '<div class="rhead"><b class="mono">' + esc(w.number) + '</b> ' + woAssignChip(w) + ' ' + woStatusChip(w) + '</div>' +
-      '<div class="sub">' + esc(w.property) + ' &middot; ' + esc(w.account) + '</div>' +
-      '<div class="sub">' + esc(w.style) + ' &middot; ' + esc(w.color) + ' &middot; ' + fmtWidth(w.widthIn) +
-      (w.rollId ? ' &middot; roll <b class="mono">' + esc(w.rollId) + '</b>' : '') + '</div></button>';
-  }).join('');
-  var html =
-    '<div class="screen">' +
-    pageHead('🧾 Work Orders', 'Assign · track · cut against') +
-    '<div class="chiprow">' + tabs + '</div>' +
-    (rows || '<p class="hint center">No work orders in this view.</p>') +
-    '</div>';
-  return { html: html, mount: function () {
-    Array.prototype.forEach.call(document.querySelectorAll('[data-tab]'), function (b) {
-      b.onclick = function () { go('work-orders', b.getAttribute('data-tab')); };
-    });
-    Array.prototype.forEach.call(document.querySelectorAll('[data-wo]'), function (b) {
-      b.onclick = function () { go('work-order', b.getAttribute('data-wo')); };
-    });
-  }};
-};
-
-Screens['work-order'] = function (param) {
-  var w = woById(param);
-  if (!w) { setTimeout(function () { go('work-orders'); }, 0); return { html: '' }; }
-  var roll = w.rollId ? rollById(w.rollId) : null;
-  var cuts = FG().cuts.filter(function (c) { return c.order === w.number; })
-    .sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
-  var empOpts = DB.data.employees.map(function (e, i) {
-    var eid = 'e' + (i + 1);
-    return '<option value="' + eid + '"' + (w.assigneeId === eid ? ' selected' : '') + '>' + esc(e) + '</option>';
-  }).join('');
-  var rollOpts = FG().rolls.map(function (r) {
-    return '<option value="' + esc(r.id) + '"' + (w.rollId === r.id ? ' selected' : '') + '>' +
-      esc(r.id) + ' — ' + esc(r.style) + ' (' + fmtLen(systemBalance(r.id)) + ')</option>';
-  }).join('');
-  var html =
-    '<div class="screen">' +
-    '<button class="backbtn" id="back">← BACK</button>' +
-    '<div class="step-head">WORK ORDER</div>' +
-    '<h1 class="mono">' + esc(w.number) + '</h1>' +
-    '<div>' + woAssignChip(w) + ' ' + woStatusChip(w) + '</div>' +
-    '<div class="card">' +
-      '<div class="kv"><span class="k">Property</span><span class="v">' + esc(w.property) + '</span></div>' +
-      '<div class="kv"><span class="k">Account</span><span class="v">' + esc(w.account) + '</span></div>' +
-      '<div class="kv"><span class="k">Style / Color</span><span class="v">' + esc(w.style) + ' / ' + esc(w.color) + '</span></div>' +
-      '<div class="kv"><span class="k">Material</span><span class="v">' + esc(w.materialType) + '</span></div>' +
-      '<div class="kv"><span class="k">Width</span><span class="v">' + fmtWidth(w.widthIn) + '</span></div>' +
-      '<div class="kv"><span class="k">Quantity</span><span class="v num">' + esc(String(w.quantity)) + ' ' + esc(w.uom) + '</span></div>' +
-    '</div>' +
-    '<h2>Assigned inventory</h2>' +
-    '<div class="card">' +
-      (roll
-        ? '<div class="kv"><span class="k">Roll</span><span class="v mono"><b>' + esc(roll.id) + '</b></span></div>' +
-          '<div class="kv"><span class="k">Roll balance</span><span class="v num">' + fmtLen(systemBalance(roll.id)) + '</span></div>' +
-          '<button class="btn" id="goroll">VIEW ROLL</button>'
-        : '<p class="hint">No roll assigned yet.</p>') +
-      '<div class="field"><label class="label" for="wo-roll">LINK ROLL</label>' +
-      '<select class="input" id="wo-roll"><option value="">— choose a roll —</option>' + rollOpts + '</select></div>' +
-      '<div class="btn-row"><button class="btn btn-primary" id="wo-linkroll" style="flex:1">LINK ROLL</button>' +
-      '<button class="btn" id="wo-scanroll" style="flex:1">📷 SCAN TO LINK</button></div>' +
-    '</div>' +
-    '<h2>Assignment</h2>' +
-    '<div class="card">' +
-      '<div class="field"><label class="label" for="wo-emp">ASSIGNED EMPLOYEE</label>' +
-      '<select class="input" id="wo-emp"><option value="">— unassigned —</option>' + empOpts + '</select></div>' +
-      '<button class="btn btn-primary" id="wo-assign">SAVE ASSIGNMENT</button>' +
-    '</div>' +
-    '<h2>Status</h2>' +
-    '<div class="btn-row">' +
-      '<button class="btn" id="wo-start" style="flex:1">▶ START WORK</button>' +
-      '<button class="btn" id="wo-complete" style="flex:1">✔ COMPLETE</button>' +
-    '</div>' +
-    '<h2>Cut activity</h2>' +
-    (cuts.length ? cuts.map(function (c) {
-      return '<button class="rowbtn" data-roll="' + esc(c.rollId) + '">' +
-        '<div class="rhead"><b class="mono">' + esc(c.rollId) + '</b>' +
-        ' <span class="sub">cut <b class="num">' + fmtLen(c.inches) + '</b></span></div>' +
-        '<div class="sub">' + esc(c.by) + ' &middot; ' + fmtDT(c.at) + ' &middot; new bal <b class="num">' + fmtLen(c.newIn) + '</b></div></button>';
-    }).join('') : '<p class="hint">No cuts recorded against this work order yet.</p>') +
-    '<button class="btn btn-primary btn-huge" id="wo-cut">✂️ CUT ROLL FOR THIS ORDER</button>' +
-    '</div>';
-  return { html: html, mount: function () {
-    $('#back').onclick = function () { history.back(); };
-    if ($('#goroll')) $('#goroll').onclick = function () { go('roll', w.rollId); };
-    $('#wo-assign').onclick = function () {
-      w.assigneeId = $('#wo-emp').value || null;
-      DB.save(); good(); render();
-    };
-    $('#wo-linkroll').onclick = function () {
-      var rid = $('#wo-roll').value;
-      if (!rid) { bad(); return; }
-      w.rollId = rid;
-      if (w.opStatus === 'OPEN') w.opStatus = 'IN_PROGRESS';
-      DB.save(); good(); render();
-    };
-    $('#wo-scanroll').onclick = function () { go('work-order/link', w.id); };
-    $('#wo-start').onclick = function () { w.opStatus = 'IN_PROGRESS'; DB.save(); good(); render(); };
-    $('#wo-complete').onclick = function () {
-      showConfirm({ title: 'Complete ' + w.number + '?', body: 'Marks the work order COMPLETE.', okLabel: 'COMPLETE' })
-        .then(function (ok) { if (ok) { w.opStatus = 'COMPLETE'; DB.save(); good(); render(); } });
-    };
-    $('#wo-cut').onclick = function () {
-      newCutSession();
-      if (w.rollId && rollById(w.rollId)) { C.roll = rollById(w.rollId); C.woId = w.id; go('cut/entry'); }
-      else go('cut/scan');
-    };
-    Array.prototype.forEach.call(document.querySelectorAll('[data-roll]'), function (b) {
-      b.onclick = function () { go('roll', b.getAttribute('data-roll')); };
-    });
-  }};
-};
-
-/* Scan a roll to link it to a work order (assign inventory). */
-Screens['work-order/link'] = function (param) {
-  var w = woById(param);
-  if (!w) { setTimeout(function () { go('work-orders'); }, 0); return { html: '' }; }
-  var html =
-    '<div class="screen">' +
-    '<div class="step-head">LINK ROLL — ' + esc(w.number) + '</div>' +
-    '<h1>Scan the roll</h1>' +
-    '<div class="cambox" id="cambox"></div>' +
-    '<div id="result"></div>' +
-    '<div class="card"><div class="label">TYPE THE BARCODE</div>' +
-    '<form id="manualform"><div class="field"><input class="input mono" id="manual" autocomplete="off" autocapitalize="characters" placeholder="e.g. QH5CPHN"></div>' +
-    '<button class="btn btn-primary" type="submit">LINK THIS ROLL</button></form></div>' +
-    '<button class="btn" id="cancel">CANCEL</button>' +
-    '</div>';
-  return { html: html, mount: function () {
-    mountScannerBox('cambox', onCode);
-    $('#manualform').onsubmit = function (e) { e.preventDefault(); onCode($('#manual').value); };
-    $('#cancel').onclick = function () { go('work-order', w.id); };
-  }};
-  function onCode(code) {
-    var norm = normalizeBarcode(code);
-    var roll = norm && rollByBarcode(norm);
-    if (!roll) {
-      bad();
-      $('#result').innerHTML = '<div class="err center">&#10060; ROLL NOT FOUND — try again.</div>';
-      return;
-    }
-    w.rollId = roll.id;
-    if (w.opStatus === 'OPEN') w.opStatus = 'IN_PROGRESS';
-    DB.save(); good();
-    go('work-order', w.id);
-  }
-};
-
-/* ---------------- boot ---------------- */
-function wireShell() {
-  $('#hamburger').onclick = openDrawer;
-  $('#scrim').onclick = closeDrawer;
-  $('#empchip').onclick = function () { go('signin'); };
-  document.addEventListener('keydown', function (e) {
-    if (e && e.key === 'Escape') closeDrawer();
-  });
-}
-
 /* ======================================================================
    PORTED FROM FloorGuard prototype (LEGACY / REFERENCE ONLY).
    Mechanical extraction; reviewed before merge. FG(). -> FG().
@@ -1359,15 +419,8 @@ Screens['count/standard'] = function () {
     var roll = rollByBarcode(code);
     if (!roll) {
       bad();
-      var norm0 = normalizeBarcode(code);
       $('#result').innerHTML = '<div class="err center" style="font-size:1.3rem">&#10060; ROLL NOT FOUND<br><span style="font-size:1rem">"' +
-        esc(code) + '" is not in the system.</span></div>' +
-        '<button class="btn btn-free" id="todisc">🆓 OPEN IN FREE RUN (DISCOVERY)</button>';
-      $('#todisc').onclick = function () {
-        newFreeRun();
-        if (norm0) F.firstScan = norm0;
-        go('count/free/loc');
-      };
+        esc(code) + '" is not in the system. Try again.</span></div>';
       return;
     }
     good();
@@ -1650,18 +703,6 @@ Screens['count/standard/mismatch'] = function () {
 
 /* ---------------- submit + saved --------------------------------------------- */
 
-/* Work-order options for the cut screen: open orders first. */
-function woOptions(selectedId) {
-  var wos = (FG().workOrders || []).slice().sort(function (a, b) {
-    var rank = function (w) { return w.opStatus === 'COMPLETE' ? 2 : (w.opStatus === 'IN_PROGRESS' ? 0 : 1); };
-    return rank(a) - rank(b);
-  });
-  return wos.map(function (w) {
-    return '<option value="' + esc(w.id) + '"' + (w.id === selectedId ? ' selected' : '') + '>' +
-      esc(w.number) + ' \u2014 ' + esc(w.property) + ' (' + esc(w.opStatus) + ')</option>';
-  }).join('');
-}
-
 /* ---- prototype lines 985-1187 ---- */
 function submitCount(flagged) {
   var roll = S.roll;
@@ -1754,7 +795,6 @@ Screens['cut/scan'] = function () {
 Screens['cut/entry'] = function () {
   if (!C || !C.roll) { setTimeout(function () { go('cut/scan'); }, 0); return { html: '' }; }
   var roll = C.roll, bal = systemBalance(roll.id);
-  var preWo = C.woId || '';
   var orderOpts = CutService.recentOrders().map(function (o) {
     return '<option value="' + esc(o) + '">';
   }).join('');
@@ -1771,8 +811,6 @@ Screens['cut/entry'] = function () {
         (isTestBalance(roll) ? ' <span class="stchip st-yellow">TEST</span>' : '') +
         '</span><span class="v num" style="font-size:1.5rem">' + fmtLen(bal) + '</span></div>' +
     '</div>' +
-    '<div class="field"><label class="label" for="wo">WORK ORDER (optional)</label>' +
-      '<select class="input" id="wo"><option value="">&#8212; none &#8212;</option>' + woOptions(preWo) + '</select></div>' +
     '<div class="field"><label class="label" for="order">ORDER NUMBER</label>' +
       '<input class="input mono" id="order" list="orders" autocomplete="off" autocapitalize="characters" placeholder="e.g. XS024536">' +
       '<datalist id="orders">' + orderOpts + '</datalist></div>' +
@@ -1803,22 +841,12 @@ Screens['cut/entry'] = function () {
     $('#savecut').onclick = function () {
       var ft = $('#cft').value.trim(), inch = $('#cin').value.trim();
       var cutIn = Math.round((parseFloat(ft || '0')) * 12 + parseFloat(inch || '0'));
-      var woId = $('#wo').value;
-      var wo = woId ? woById(woId) : null;
-      var orderVal = wo ? wo.number : $('#order').value;
       var res = CutService.recordCut({
-        rollId: roll.id, order: orderVal,
+        rollId: roll.id, order: $('#order').value,
         cutIn: (ft === '' && inch === '') ? 0 : cutIn,
         employee: DB.data.currentEmployee, location: roll.expectedLocation
       });
       if (!res.ok) { bad(); var e = $('#cuterr'); e.textContent = res.err; e.hidden = false; return; }
-      if (wo) {
-        /* WORK ORDER -> ASSIGN INVENTORY -> CUT: the cut roll becomes the
-           order's roll and the order moves to IN_PROGRESS. */
-        wo.rollId = roll.id;
-        if (wo.opStatus === 'OPEN') wo.opStatus = 'IN_PROGRESS';
-        DB.save();
-      }
       good();
       go('cut/saved', res.rec.id);
     };
@@ -1883,11 +911,7 @@ Screens['count/standard/saved'] = function (param) {
 /* ---- prototype lines 1188-1326 ---- */
 Screens['roll'] = function (param) {
   var roll = rollById(param);
-  if (!roll) {
-    var disc0 = (typeof findDiscovered === 'function') ? findDiscovered(param) : null;
-    if (disc0) return rollDiscoveredScreen(param);
-    setTimeout(function () { go('rolls/search'); }, 0); return { html: '' };
-  }
+  if (!roll) { setTimeout(function () { go('rolls/search'); }, 0); return { html: '' }; }
   var sys = systemBalance(roll.id);
   var docs = docsForRoll(roll.id);
   var html =
@@ -1913,7 +937,6 @@ Screens['roll'] = function (param) {
     '<h2>Documents</h2>' +
     '<div class="label" style="margin-bottom:8px">ORIGINAL HISTORY CARDS</div>' +
     (docs.length ? docsHtml(docs) : '<div class="hint">No history cards captured yet.</div>') +
-    '<button class="btn btn-huge" id="cutthis">&#9986; CUT THIS ROLL</button>' +
     '<button class="btn btn-primary btn-huge" id="countthis">&#9654; COUNT THIS ROLL</button>' +
     '</div>';
   return { html: html, mount: function () {
@@ -1921,12 +944,8 @@ Screens['roll'] = function (param) {
       newDocCapture(roll.id, { location: roll.expectedLocation, returnTo: { name: 'roll', param: roll.id } });
       go('roll/doc');
     };
-    $('#cutthis').onclick = function () { newCutSession(); C.roll = roll; go('cut/entry'); };
     $('#countthis').onclick = function () { newSession(); S.roll = roll; go('count/standard/loc'); };
     wireDocViews();
-    Array.prototype.forEach.call(document.querySelectorAll('[data-wo]'), function (b) {
-      b.onclick = function () { go('work-order', b.getAttribute('data-wo')); };
-    });
   }};
 };
 
@@ -1948,10 +967,6 @@ function ledgerHtml(roll) {
   var ev = [];
   FG().cuts.forEach(function (c) {
     if (c.rollId === roll.id) ev.push({ kind: 'cut', at: c.at, inches: c.inches, by: c.by, order: c.order, newIn: c.newIn });
-  });
-  /* WORK ORDER ACTIVITY: orders with this roll assigned. */
-  (FG().workOrders || []).forEach(function (w) {
-    if (w.rollId === roll.id) ev.push({ kind: 'wo', at: w.createdAt, wo: w });
   });
   FG().counts.forEach(function (c) {
     if (c.rollId === roll.id) ev.push({ kind: 'count', at: c.at, rec: c });
@@ -1988,12 +1003,6 @@ function ledgerHtml(roll) {
         '<div class="what"><b>Cut</b> <span class="num">' + fmtLen(e.inches) + '</span>' + orderTag +
         '<div class="sub">' + fmtDT(e.at) + ' &middot; ' + esc(e.by) + ' &middot; <span class="srcchip">FLOORGUARD</span></div></div>' +
         '<div class="bal"><div class="sub">New Balance</div><span class="num">' + fmtLen(newBal) + '</span></div></div>';
-    } else if (e.kind === 'wo') {
-      var wact = e.wo;
-      out += '<div class="ledger-row"><span class="dot" style="background:#a78bfa"></span>' +
-        '<div class="what"><b>Work Order Activity</b> <span class="mono">' + esc(wact.number) + '</span> ' + woStatusChip(wact) +
-        '<div class="sub">' + esc(wact.property) + ' &middot; ' + fmtDT(wact.createdAt) + ' &middot; <span class="srcchip">FLOORGUARD</span></div></div>' +
-        '<div class="bal"><button class="btn btn-xs" data-wo="' + esc(wact.id) + '">OPEN ORDER</button></div></div>';
     } else if (e.kind === 'count') {
       var r = e.rec;
       var phys = (r.physicalIn == null) ? '—' : fmtLen(r.physicalIn);
@@ -2459,7 +1468,7 @@ Screens['count/free/balance'] = function () {
     $('#fdochist').onclick = function () {
       /* Optional: capture the paper history card, then come back here to
          enter the measured balance. Never forced, normally once per roll. */
-      newDocCapture(s.rollId, { location: F.activeLoc, returnTo: { name: 'count/free/balance' } });
+      newDocCapture(s.rollId, { location: F.activeLoc, returnTo: { name: 'free-balance' } });
       go('roll/doc');
     };
     $('#fsavenext').onclick = function () {
@@ -2677,7 +1686,7 @@ function reportFilterLabel(f) {
 }
 
 function reportRowHtml(r) {
-  var target = r.discovered ? 'disc' : 'roll';
+  var target = r.discovered ? 'disc-roll' : 'roll';
   return '<tr data-goto="' + target + '" data-roll="' + esc(r.rollId) + '">' +
     '<td class="mono"><b>' + esc(r.loc) + '</b></td>' +
     '<td class="mono">' + esc(r.rollId) + (r.discovered ? ' <span class="stchip st-blue">NEW</span>' : '') + '</td>' +
@@ -2954,9 +1963,6 @@ Screens['count/report/print'] = function (sessId) {
 /* --- DISCOVERED ROLL DETAIL (§7 for never-before-seen rolls) --- */
 
 /* ---- prototype lines 2318-2369 ---- */
-Screens['disc'] = function (rollId) {
-  return rollDiscoveredScreen(rollId);
-};
 function rollDiscoveredScreen(rollId) {
   var d = findDiscovered(rollId);
   if (!d) { setTimeout(function () { history.back(); }, 0); return { html: '' }; }
@@ -3669,11 +2675,3 @@ document.addEventListener('DOMContentLoaded', function () {
   DB.load();
   render();
 });
-
-DB.load();
-renderDrawer();
-wireShell();
-if (typeof window !== 'undefined' && window.addEventListener) {
-  window.addEventListener('hashchange', render);
-}
-render();

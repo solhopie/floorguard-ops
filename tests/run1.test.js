@@ -42,7 +42,7 @@ vm.createContext(sandbox);
 
 /* ---------- load the app (strip the boot block) ---------- */
 var src = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
-var bootIdx = src.indexOf('/* ---------------- boot');
+var bootIdx = src.lastIndexOf('/* ---------------- boot'); /* real boot is last; a ported section reuses the word */
 if (bootIdx >= 0) src = src.slice(0, bootIdx);
 vm.runInContext(src, sandbox, { filename: 'app.js' });
 
@@ -61,7 +61,7 @@ function ok(cond, name) {
 
 /* DB layer */
 DB.data = DB.seed();
-ok(DB.data.schema === 1, 'seed schema is 1');
+ok(DB.data.schema === 2, 'seed schema is 2 (shared FloorGuard store)');
 ok(DB.data.currentEmployee === null, 'seed has no session');
 ok(Array.isArray(DB.data.employees) && DB.data.employees.length === 3, 'seed has 3 demo employees');
 ok(DB.data.modules && typeof DB.data.modules === 'object', 'seed has modules namespace map');
