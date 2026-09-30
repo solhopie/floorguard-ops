@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>FloorGuard Ops</title>
+<link rel="stylesheet" href="styles.css?v=1">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+</head>
+<body>
+<header id="topbar">
+  <button id="hamburger" aria-label="Open navigation">&#9776;</button>
+  <div id="tb-title">FLOORGUARD <span class="ops">OPS</span></div>
+  <button id="empchip" class="empchip" aria-label="Switch employee"></button>
+</header>
+<div id="scrim" hidden></div>
+<nav id="drawer" aria-label="Main navigation">
+  <div class="drawer-head">
+    <div class="drawer-brand">FLOORGUARD <span class="ops">OPS</span></div>
+    <div class="drawer-sub">Warehouse Operations</div>
+  </div>
+  <div id="drawer-nav"></div>
+  <div class="drawer-foot">v0.1.0 &middot; Run 1 Foundation</div>
+</nav>
+<main id="view"></main>
+<script src="app.js?v=1"></script>
+</body>
+</html>
