@@ -15,8 +15,15 @@ var TABLES = [
   'history_events', 'documents', 'history_card_imports', 'discrepancies',
   'audit_events',
   /* Run 6: commercial layer. */
-  'orders', 'order_items', 'sales_orders', 'sales_order_lines'
+  'orders', 'order_items', 'sales_orders', 'sales_order_lines',
+  /* Run 7: central numbering + loadout + receipts. */
+  'business_number_counters', 'number_issues',
+  'loadouts', 'loadout_lines', 'loadout_exceptions',
+  'receipts', 'receipt_lines', 'receipt_exceptions'
 ];
+
+var NUMBER_SEED = { ORD: ['ORD-', 100001], SO: ['SO-', 100001], WO: ['WO-', 200001],
+                    RCV: ['RCV-', 100001], LOAD: ['LOAD-', 100001] };
 
 function startDouble() {
   var seq = 1000;
@@ -32,6 +39,10 @@ function startDouble() {
 
   /* Seed: mirrors supabase/seed.sql (demo warehouse + two rolls + two WOs). */
   function seed() {
+    Object.keys(NUMBER_SEED).forEach(function (k) {
+      state.tables.business_number_counters.set(k,
+        { kind: k, prefix: NUMBER_SEED[k][0], next_val: NUMBER_SEED[k][1] });
+    });
     var todayD = new Date(), tomD = new Date(todayD.getTime() + 86400000);
     function dstr(d) { return d.toISOString().slice(0, 10); }
     var rolls = state.tables.rolls;
@@ -197,6 +208,23 @@ function startDouble() {
 
   /* ---- Run 6: order -> sales order / line -> work order (atomic RPCs) ---- */
   /* Idempotency: same order id or same line id never creates a duplicate. */
+  /* Atomic order creation: number issued inside the same step, idempotent on order id. */
+  function rpcCreateOrder(b) {
+    var orders = state.tables.orders;
+    var now = new Date().toISOString();
+    var existing = orders.get(b.p_order_id);
+    if (existing) return { ok: true, duplicate: true, order_id: existing.id, number: existing.number };
+    var num = issueNum('ORD', 'ord-num:' + b.p_order_id);
+    var o = { id: b.p_order_id, number: num, warehouse_id: b.p_warehouse_id,
+      property: b.p_property, account: b.p_account || null,
+      requested_date: b.p_requested_date || null, scheduled_date: b.p_scheduled_date || null,
+      priority: b.p_priority || 'NORMAL', created_by: b.p_created_by || null,
+      internal_ref: b.p_internal_ref || null, notes: b.p_notes || null,
+      status: 'DRAFT', sales_order_id: null, submitted_at: null,
+      created_at: now, updated_at: now };
+    orders.set(o.id, o);
+    return { ok: true, duplicate: false, order_id: o.id, number: num };
+  }
   function rpcSubmitSalesOrder(b) {
     var orders = state.tables.orders, items = state.tables.order_items;
     var sos = state.tables.sales_orders, solines = state.tables.sales_order_lines;
@@ -213,7 +241,7 @@ function startDouble() {
       .sort(function (a, b) { return (a.seq || 0) - (b.seq || 0); });
     if (!its.length) return errObj('ORDER_HAS_NO_ITEMS', 'Order has no items.');
     var soId = b.p_sales_order_id || nid('SO');
-    var so = { id: soId, number: b.p_number, source_order_id: o.id, warehouse_id: o.warehouse_id,
+    var so = { id: soId, number: b.p_number || issueNum('SO', 'so-num:' + soId), source_order_id: o.id, warehouse_id: o.warehouse_id,
       property: o.property, account: o.account, priority: o.priority,
       requested_date: o.requested_date, scheduled_date: o.scheduled_date,
       status: 'OPEN', created_by: o.created_by, submitted_by: b.p_submitted_by || null,
@@ -254,7 +282,7 @@ function startDouble() {
     if (l.status !== 'OPEN')
       return errObj('LINE_NOT_OPEN', 'Line is not open for release.', { status: l.status });
     var woId = b.p_work_order_id || nid('WO');
-    var wo = { id: woId, number: b.p_wo_number, warehouse_id: so.warehouse_id,
+    var wo = { id: woId, number: b.p_wo_number || issueNum('WO', 'wo-num:' + woId), warehouse_id: so.warehouse_id,
       property: so.property, account: so.account, status: 'OPEN',
       assignment_status: 'UNASSIGNED', assignee_id: null,
       scheduled_date: so.scheduled_date, scheduled_time: null, priority: so.priority,
@@ -279,6 +307,272 @@ function startDouble() {
       related_work_order_id: woId, new_value: JSON.stringify({ line_id: l.id }), created_at: now });
     return { ok: true, duplicate: false, work_order_id: woId, number: wo.number };
   }
+
+/* ---- Run 7: central numbering + loadout + receipts ---- */
+function rpcIssueBusinessNumber(b) {
+  var key = b.p_request_key;
+  if (key && state.idempotency['num:' + key]) {
+    var prev = state.idempotency['num:' + key];
+    return { ok: true, duplicate: true, number: prev.number };
+  }
+  var ctr = state.tables.business_number_counters.get(b.p_kind);
+  if (!ctr) return errObj('UNKNOWN_NUMBER_KIND', 'Unknown number kind.');
+  var issued = ctr.prefix + ctr.next_val;
+  ctr.next_val += 1;
+  if (key) state.idempotency['num:' + key] = { number: issued };
+  return { ok: true, duplicate: false, number: issued };
+}
+function issueNum(kind, key) {
+  return rpcIssueBusinessNumber({ p_kind: kind, p_request_key: key }).number;
+}
+function rpcStartLoadout(b) {
+  var wos = state.tables.work_orders, los = state.tables.loadouts, lls = state.tables.loadout_lines;
+  var now = new Date().toISOString();
+  var w = wos.get(b.p_work_order_id);
+  if (!w) return errObj('WORK_ORDER_NOT_FOUND', 'Work order does not exist.');
+  if (b.p_request_key) {
+    var byKey = Array.from(los.values()).filter(function (l) { return l.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, loadout_id: byKey.id, number: byKey.number };
+  }
+  var open = Array.from(los.values()).filter(function (l) {
+    return l.work_order_id === w.id && ['READY', 'IN_PROGRESS', 'LOADED'].indexOf(l.status) >= 0;
+  })[0];
+  if (open) return { ok: true, duplicate: true, loadout_id: open.id, number: open.number };
+  /* Authoritative readiness: every material line needs a CONSUMED assignment. */
+  var mlines = Array.from(state.tables.work_order_material_lines.values())
+    .filter(function (l) { return l.work_order_id === w.id; });
+  var notReady = mlines.filter(function (ml) {
+    return !Array.from(state.tables.inventory_assignments.values()).some(function (a) {
+      return a.work_order_id === w.id && a.line_id === ml.id && a.status === 'CONSUMED';
+    });
+  });
+  if (notReady.length) return errObj('LOADOUT_NOT_READY', 'Not all material lines are cut.');
+  var num = issueNum('LOAD', 'load-num:' + b.p_loadout_id);
+  var lo = { id: b.p_loadout_id, number: num, work_order_id: w.id,
+    sales_order_id: w.sales_order_id || null, warehouse_id: w.warehouse_id,
+    property: w.property, account: w.account, status: 'READY',
+    priority: w.priority || 'NORMAL',
+    started_by: b.p_by, started_at: now, completed_by: null, completed_at: null,
+    on_hold: false, hold_reason: null, notes: null,
+    client_request_key: b.p_request_key || null, created_at: now, updated_at: now };
+  los.set(lo.id, lo);
+  (b.p_lines || []).forEach(function (ln, i) {
+    var lid = lo.id + '-L' + (i + 1);
+    lls.set(lid, { id: lid, loadout_id: lo.id, seq: i + 1,
+      style: ln.style || null, color: ln.color || null, material_type: ln.material_type || null,
+      uom: ln.uom || null, width_in: ln.width_in || null,
+      required_in: ln.required_in || null, required_count: ln.required_count || null,
+      prepared_in: ln.prepared_in || null, roll_id: ln.roll_id || null, barcode: ln.barcode || null,
+      status: 'WAITING', verified_by: null, verified_at: null,
+      loaded_by: null, loaded_at: null, created_at: now });
+  });
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: w.warehouse_id,
+    action: 'LOADOUT_STARTED', entity_type: 'loadout', entity_id: lo.id,
+    related_work_order_id: w.id, user_name: b.p_by, created_at: now });
+  return { ok: true, duplicate: false, loadout_id: lo.id, number: num };
+}
+function rpcBeginLoadoutLoading(b) {
+  var lo = state.tables.loadouts.get(b.p_loadout_id);
+  if (!lo) return errObj('LOADOUT_NOT_FOUND', 'Loadout does not exist.');
+  if (lo.status === 'IN_PROGRESS') return { ok: true, duplicate: true };
+  if (lo.status !== 'READY') return errObj('INVALID_STATUS', 'Loadout is not ready.');
+  lo.status = 'IN_PROGRESS'; lo.updated_at = new Date().toISOString();
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: lo.warehouse_id,
+    action: 'LOADOUT_LOADING_BEGUN', entity_type: 'loadout', entity_id: lo.id,
+    related_work_order_id: lo.work_order_id, user_name: b.p_by, created_at: lo.updated_at });
+  return { ok: true, duplicate: false };
+}
+function rpcVerifyLoadoutLine(b) {
+  var lo = state.tables.loadouts.get(b.p_loadout_id);
+  if (!lo) return errObj('LOADOUT_NOT_FOUND', 'Loadout does not exist.');
+  if (lo.status === 'COMPLETED') return errObj('LOADOUT_COMPLETED', 'Loadout is completed.');
+  var ln = state.tables.loadout_lines.get(b.p_line_id);
+  if (!ln || ln.loadout_id !== lo.id) return errObj('LINE_NOT_FOUND', 'Line does not exist.');
+  if (ln.status === 'VERIFIED') return { ok: true, duplicate: true };
+  if (['WAITING', 'EXCEPTION'].indexOf(ln.status) < 0)
+    return errObj('INVALID_STATUS', 'Line cannot be verified.');
+  var now = new Date().toISOString();
+  var want = String(ln.barcode || '').trim().toUpperCase();
+  var got = String(b.p_barcode || '').trim().toUpperCase();
+  if (want && want === got) {
+    ln.status = 'VERIFIED'; ln.verified_by = b.p_by; ln.verified_at = now;
+    state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: lo.warehouse_id,
+      action: 'LOADOUT_LINE_VERIFIED', entity_type: 'loadout', entity_id: lo.id,
+      related_work_order_id: lo.work_order_id, user_name: b.p_by, created_at: now });
+    return { ok: true, duplicate: false };
+  }
+  state.tables.loadout_exceptions.set(nid('LE'), { id: nid('LE'), loadout_id: lo.id,
+    line_id: ln.id, type: 'WRONG MATERIAL',
+    notes: 'Scanned ' + b.p_barcode + ', expected ' + (ln.barcode || '—') + '.',
+    created_by: b.p_by, created_at: now });
+  ln.status = 'EXCEPTION';
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: lo.warehouse_id,
+    action: 'LOADOUT_EXCEPTION', entity_type: 'loadout', entity_id: lo.id,
+    related_work_order_id: lo.work_order_id, user_name: b.p_by, created_at: now });
+  return { ok: true, wrong_material: true };
+}
+function rpcMarkLoadoutLineLoaded(b) {
+  var lo = state.tables.loadouts.get(b.p_loadout_id);
+  if (!lo) return errObj('LOADOUT_NOT_FOUND', 'Loadout does not exist.');
+  var ln = state.tables.loadout_lines.get(b.p_line_id);
+  if (!ln || ln.loadout_id !== lo.id) return errObj('LINE_NOT_FOUND', 'Line does not exist.');
+  if (ln.status === 'LOADED') return { ok: true, duplicate: true };
+  if (ln.status !== 'VERIFIED') return errObj('LINE_NOT_VERIFIED', 'Line must be verified first.');
+  var now = new Date().toISOString();
+  ln.status = 'LOADED'; ln.loaded_by = b.p_by; ln.loaded_at = now;
+  var rest = Array.from(state.tables.loadout_lines.values())
+    .filter(function (l) { return l.loadout_id === lo.id && l.status !== 'LOADED'; });
+  lo.status = rest.length ? 'IN_PROGRESS' : 'LOADED';
+  lo.updated_at = now;
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: lo.warehouse_id,
+    action: 'LOADOUT_LINE_LOADED', entity_type: 'loadout', entity_id: lo.id,
+    related_work_order_id: lo.work_order_id, user_name: b.p_by, created_at: now });
+  return { ok: true, duplicate: false };
+}
+function rpcCreateLoadoutException(b) {
+  var lo = state.tables.loadouts.get(b.p_loadout_id);
+  if (!lo) return errObj('LOADOUT_NOT_FOUND', 'Loadout does not exist.');
+  var now = new Date().toISOString();
+  state.tables.loadout_exceptions.set(nid('LE'), { id: nid('LE'), loadout_id: lo.id,
+    line_id: b.p_line_id || null, type: b.p_type, notes: b.p_notes || null,
+    created_by: b.p_by, created_at: now });
+  if (b.p_line_id) {
+    var ln = state.tables.loadout_lines.get(b.p_line_id);
+    if (ln && ln.loadout_id === lo.id) ln.status = 'EXCEPTION';
+  }
+  return { ok: true };
+}
+function rpcCompleteLoadout(b) {
+  var lo = state.tables.loadouts.get(b.p_loadout_id);
+  if (!lo) return errObj('LOADOUT_NOT_FOUND', 'Loadout does not exist.');
+  if (lo.status === 'COMPLETED') return { ok: true, duplicate: true };
+  var pending = Array.from(state.tables.loadout_lines.values())
+    .filter(function (l) { return l.loadout_id === lo.id && l.status !== 'LOADED'; });
+  if (pending.length) return errObj('LOADOUT_INCOMPLETE', 'Not all lines are loaded.');
+  var now = new Date().toISOString();
+  lo.status = 'COMPLETED'; lo.completed_by = b.p_by; lo.completed_at = now; lo.updated_at = now;
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: lo.warehouse_id,
+    action: 'LOADOUT_COMPLETED', entity_type: 'loadout', entity_id: lo.id,
+    related_work_order_id: lo.work_order_id, user_name: b.p_by, created_at: now });
+  return { ok: true, duplicate: false };
+}
+function rpcCreateReceipt(b) {
+  var rs = state.tables.receipts;
+  var now = new Date().toISOString();
+  if (b.p_request_key) {
+    var byKey = Array.from(rs.values()).filter(function (r) { return r.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, receipt_id: byKey.id, number: byKey.number };
+  }
+  var num = issueNum('RCV', 'rcv-num:' + b.p_receipt_id);
+  var r = { id: b.p_receipt_id, number: num, warehouse_id: 'main',
+    supplier: b.p_supplier || null, reference_number: b.p_reference || null,
+    status: b.p_expected ? 'EXPECTED' : 'RECEIVING', expected_date: null,
+    notes: b.p_notes || null, created_by: b.p_by, created_at: now,
+    completed_by: null, completed_at: null, client_request_key: b.p_request_key || null };
+  rs.set(r.id, r);
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: 'main',
+    action: 'RECEIPT_CREATED', entity_type: 'receipt', entity_id: r.id,
+    user_name: b.p_by, created_at: now });
+  return { ok: true, duplicate: false, receipt_id: r.id, number: num };
+}
+function rpcAddReceiptLine(b) {
+  var rs = state.tables.receipts, rls = state.tables.receipt_lines;
+  var now = new Date().toISOString();
+  var r = rs.get(b.p_receipt_id);
+  if (!r) return errObj('RECEIPT_NOT_FOUND', 'Receipt does not exist.');
+  if (r.status === 'RECEIVED') return errObj('RECEIPT_COMPLETED', 'Receipt is completed.');
+  if (b.p_request_key) {
+    var byKey = Array.from(rls.values()).filter(function (l) { return l.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, line_id: byKey.id };
+  }
+  var seq = Array.from(rls.values()).filter(function (l) { return l.receipt_id === r.id; }).length + 1;
+  var l = { id: b.p_line_id, receipt_id: r.id, seq: seq,
+    material_type: b.p_material_type || null, uom: b.p_uom || null,
+    style: b.p_style || null, color: b.p_color || null, manufacturer: null,
+    width_in: null, expected_qty_in: b.p_expected_qty_in || null,
+    expected_qty: b.p_expected_qty || null, received_qty_in: null, received_qty: null,
+    roll_id: null, barcode: null, location_code: null, status: 'EXPECTED',
+    exception: null, received_by: null, received_at: null,
+    client_request_key: b.p_request_key || null };
+  rls.set(l.id, l);
+  if (r.status === 'EXPECTED') r.status = 'RECEIVING';
+  return { ok: true, duplicate: false, line_id: l.id };
+}
+function rpcReceiveRoll(b) {
+  var rs = state.tables.receipts, rls = state.tables.receipt_lines, rolls = state.tables.rolls;
+  var now = new Date().toISOString();
+  var r = rs.get(b.p_receipt_id);
+  if (!r) return errObj('RECEIPT_NOT_FOUND', 'Receipt does not exist.');
+  if (r.status === 'RECEIVED') return errObj('RECEIPT_COMPLETED', 'Receipt is completed.');
+  if (b.p_request_key) {
+    var byKey = Array.from(rls.values()).filter(function (l) { return l.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, line_id: byKey.id, roll_id: byKey.roll_id };
+  }
+  if (!b.p_length_in || b.p_length_in <= 0)
+    return errObj('INVALID_QUANTITY', 'Length must be greater than zero.');
+  var want = String(b.p_barcode || '').trim().toUpperCase();
+  var dup = Array.from(rolls.values()).filter(function (x) {
+    return String(x.barcode || '').trim().toUpperCase() === want && x.warehouse_id === r.warehouse_id;
+  })[0];
+  if (dup) {
+    if (!b.p_override) return errObj('ROLL_ALREADY_EXISTS', 'ROLL ALREADY EXISTS');
+    state.tables.receipt_exceptions.set(nid('RE'), { id: nid('RE'), receipt_id: r.id,
+      line_id: null, type: 'DUPLICATE ROLL',
+      notes: 'Barcode ' + b.p_barcode + ' already exists as roll ' + dup.id + '.',
+      created_by: b.p_by, created_at: now });
+    return { ok: true, duplicate_roll: true, roll_id: dup.id };
+  }
+  var roll = { id: b.p_roll_id, barcode: b.p_barcode, warehouse_id: r.warehouse_id,
+    manufacturer: b.p_manufacturer || null, style: b.p_style || null, color: b.p_color || null,
+    material_type: 'carpet', width_in: b.p_width_in || null,
+    beginning_in: b.p_length_in, expected_in: b.p_length_in,
+    location_code: b.p_location_code || null, version: 1,
+    measured_in: null, measured_at: null, measured_by: null, discovered: false };
+  rolls.set(roll.id, roll);
+  var seq = Array.from(rls.values()).filter(function (l) { return l.receipt_id === r.id; }).length + 1;
+  var l = { id: b.p_line_id, receipt_id: r.id, seq: seq,
+    material_type: 'CARPET', uom: 'LF', style: b.p_style || null, color: b.p_color || null,
+    manufacturer: b.p_manufacturer || null, width_in: b.p_width_in || null,
+    expected_qty_in: null, expected_qty: null,
+    received_qty_in: b.p_length_in, received_qty: null,
+    roll_id: roll.id, barcode: b.p_barcode, location_code: b.p_location_code || null,
+    status: 'RECEIVED', exception: null, received_by: b.p_by, received_at: now,
+    client_request_key: b.p_request_key || null };
+  rls.set(l.id, l);
+  if (r.status === 'EXPECTED') r.status = 'RECEIVING';
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: r.warehouse_id,
+    action: 'ROLL_RECEIVED', entity_type: 'receipt', entity_id: r.id,
+    user_name: b.p_by, created_at: now });
+  return { ok: true, duplicate: false, line_id: l.id, roll_id: roll.id };
+}
+function rpcCreateReceiptException(b) {
+  var r = state.tables.receipts.get(b.p_receipt_id);
+  if (!r) return errObj('RECEIPT_NOT_FOUND', 'Receipt does not exist.');
+  var now = new Date().toISOString();
+  state.tables.receipt_exceptions.set(nid('RE'), { id: nid('RE'), receipt_id: r.id,
+    line_id: b.p_line_id || null, type: b.p_type, notes: b.p_notes || null,
+    created_by: b.p_by, created_at: now });
+  if (b.p_line_id) {
+    var l = state.tables.receipt_lines.get(b.p_line_id);
+    if (l && l.receipt_id === r.id) { l.status = 'EXCEPTION'; l.exception = b.p_type; }
+  }
+  if (r.status !== 'RECEIVED') r.status = 'EXCEPTIONS';
+  return { ok: true };
+}
+function rpcCompleteReceipt(b) {
+  var r = state.tables.receipts.get(b.p_receipt_id);
+  if (!r) return errObj('RECEIPT_NOT_FOUND', 'Receipt does not exist.');
+  if (r.status === 'RECEIVED') return { ok: true, duplicate: true };
+  var n = Array.from(state.tables.receipt_lines.values())
+    .filter(function (l) { return l.receipt_id === r.id; }).length;
+  if (!n) return errObj('RECEIPT_HAS_NO_LINES', 'Receipt has no lines.');
+  var now = new Date().toISOString();
+  r.status = 'RECEIVED'; r.completed_by = b.p_by; r.completed_at = now;
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: r.warehouse_id,
+    action: 'RECEIPT_COMPLETED', entity_type: 'receipt', entity_id: r.id,
+    user_name: b.p_by, created_at: now });
+  return { ok: true, duplicate: false };
+}
 
   var server = http.createServer(function (req, res) {
     var parsed = url.parse(req.url, true);
@@ -333,8 +627,21 @@ function startDouble() {
         if (rm[1] === 'record_cut') out = rpcRecordCut(body || {});
         else if (rm[1] === 'reserve_inventory') out = rpcReserveInventory(body || {});
         else if (rm[1] === 'record_cycle_count') out = rpcRecordCycleCount(body || {});
+        else if (rm[1] === 'create_order') out = rpcCreateOrder(body || {});
         else if (rm[1] === 'submit_sales_order') out = rpcSubmitSalesOrder(body || {});
         else if (rm[1] === 'release_sales_order_line') out = rpcReleaseSalesOrderLine(body || {});
+        else if (rm[1] === 'issue_business_number') out = rpcIssueBusinessNumber(body || {});
+        else if (rm[1] === 'start_loadout') out = rpcStartLoadout(body || {});
+        else if (rm[1] === 'begin_loadout_loading') out = rpcBeginLoadoutLoading(body || {});
+        else if (rm[1] === 'verify_loadout_line') out = rpcVerifyLoadoutLine(body || {});
+        else if (rm[1] === 'mark_loadout_line_loaded') out = rpcMarkLoadoutLineLoaded(body || {});
+        else if (rm[1] === 'create_loadout_exception') out = rpcCreateLoadoutException(body || {});
+        else if (rm[1] === 'complete_loadout') out = rpcCompleteLoadout(body || {});
+        else if (rm[1] === 'create_receipt') out = rpcCreateReceipt(body || {});
+        else if (rm[1] === 'add_receipt_line') out = rpcAddReceiptLine(body || {});
+        else if (rm[1] === 'receive_roll') out = rpcReceiveRoll(body || {});
+        else if (rm[1] === 'create_receipt_exception') out = rpcCreateReceiptException(body || {});
+        else if (rm[1] === 'complete_receipt') out = rpcCompleteReceipt(body || {});
         else return send(res, 404, { message: 'unknown rpc' });
         return send(res, 200, out);
       }

@@ -275,7 +275,7 @@ S.NAV.forEach(function (g) {
 var old = { schema: 1, currentEmployee: 'Marcus', modules: {} };
 store[S.DB.KEY] = JSON.stringify(old);
 S.DB.load();
-ok(S.DB.data.schema === 5, 'schema 1 migrates to 5');
+ok(S.DB.data.schema === 6, 'schema 1 migrates to 6');
 ok(S.DB.data.currentEmployee === 'Marcus', 'migration preserves the session');
 ok(!!S.FG().rolls && S.FG().rolls.length > 0, 'migration seeds the shared FloorGuard store');
 

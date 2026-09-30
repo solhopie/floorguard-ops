@@ -61,7 +61,7 @@ function ok(cond, name) {
 
 /* DB layer */
 DB.data = DB.seed();
-ok(DB.data.schema === 5, 'seed schema is 5 (shared FloorGuard store + scheduling + orders)');
+ok(DB.data.schema === 6, 'seed schema is 6 (shared FloorGuard store + scheduling + orders + loadout/receipts)');
 ok(DB.data.currentEmployee === null, 'seed has no session');
 ok(Array.isArray(DB.data.employees) && DB.data.employees.length === 3, 'seed has 3 demo employees');
 ok(DB.data.modules && typeof DB.data.modules === 'object', 'seed has modules namespace map');
@@ -85,7 +85,7 @@ ok(JSON.stringify(groups) === JSON.stringify(['DASHBOARD', 'WAREHOUSE', 'OPERATI
    'nav groups in the specified order');
 var routes = [];
 NAV.forEach(function (g) { g.items.forEach(function (it) { routes.push(it.route); }); });
-ok(routes.length === 20, '20 nav items total, got ' + routes.length);
+ok(routes.length === 22, '22 nav items total, got ' + routes.length);
 ok(new Set(routes).size === routes.length, 'all nav routes unique');
 routes.forEach(function (r) {
   if (r === '__logout') return;

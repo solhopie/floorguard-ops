@@ -88,7 +88,7 @@ async function rejectsCode(p, code) {
 async function main() {
   /* ================= A. schema 5 + migration ================= */
   var S = makeDevice();
-  ok(S.DB.data.schema === 5, 'seed schema is 5');
+  ok(S.DB.data.schema === 6, 'seed schema is 6');
   ok(S.DB.data.warehouses[0].timezone === 'America/New_York', 'seed warehouse carries an explicit IANA timezone');
   ok((S.FG().orders || []).length >= 2, 'seed carries development order fixtures');
   ok((S.FG().salesOrders || []).length >= 1, 'seed carries a sales order fixture');

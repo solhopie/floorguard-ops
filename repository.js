@@ -389,6 +389,77 @@ var Mappers = {
       updatedAt: r.updated_at, lines: lines
     };
   },
+  /* ---- Run 7: loadouts ---- */
+  rowToLoadout: function (lo, lineRows, exRows) {
+    var lines = (lineRows || []).filter(function (l) { return l.loadout_id === lo.id; })
+      .sort(function (a, b) { return (a.seq || 0) - (b.seq || 0); })
+      .map(function (l) {
+        return {
+          id: l.id, seq: l.seq, style: l.style || '', color: l.color || '',
+          materialType: (l.material_type || '').toUpperCase(), uom: l.uom || 'LF',
+          widthIn: l.width_in, requiredIn: l.required_in,
+          requiredCount: l.required_count != null ? Number(l.required_count) : null,
+          preparedIn: l.prepared_in, rollId: l.roll_id || null, barcode: l.barcode || null,
+          status: l.status || 'WAITING',
+          verifiedBy: l.verified_by || null, verifiedAt: l.verified_at || null,
+          loadedBy: l.loaded_by || null, loadedAt: l.loaded_at || null
+        };
+      });
+    var exs = (exRows || []).filter(function (e) { return e.loadout_id === lo.id; })
+      .map(function (e) {
+        return { id: e.id, loadoutId: e.loadout_id, lineId: e.line_id || null,
+          type: e.type, notes: e.notes || '', by: e.created_by || '', at: e.created_at };
+      });
+    return {
+      id: lo.id, number: lo.number, workOrderId: lo.work_order_id || null,
+      salesOrderId: lo.sales_order_id || null, warehouseId: lo.warehouse_id,
+      property: lo.property || '', account: lo.account || '',
+      status: lo.status || 'READY', priority: lo.priority || 'NORMAL',
+      startedBy: lo.started_by || null, startedAt: lo.started_at || null,
+      completedBy: lo.completed_by || null, completedAt: lo.completed_at || null,
+      onHold: !!lo.on_hold, holdReason: lo.hold_reason || null,
+      notes: lo.notes || '', clientRequestKey: lo.client_request_key || null,
+      createdAt: lo.created_at, updatedAt: lo.updated_at,
+      lines: lines, exceptions: exs
+    };
+  },
+  /* ---- Run 7: receipts ---- */
+  rowToReceipt: function (r, lineRows, exRows) {
+    var lines = (lineRows || []).filter(function (l) { return l.receipt_id === r.id; })
+      .sort(function (a, b) { return (a.seq || 0) - (b.seq || 0); })
+      .map(function (l) {
+        return {
+          id: l.id, seq: l.seq,
+          materialType: (l.material_type || '').toUpperCase(), uom: l.uom || 'LF',
+          style: l.style || '', color: l.color || '', manufacturer: l.manufacturer || '',
+          widthIn: l.width_in,
+          expectedQtyIn: l.expected_qty_in,
+          expectedQty: l.expected_qty != null ? Number(l.expected_qty) : null,
+          receivedQtyIn: l.received_qty_in,
+          receivedQty: l.received_qty != null ? Number(l.received_qty) : null,
+          rollId: l.roll_id || null, barcode: l.barcode || null,
+          location: l.location_code || '', status: l.status || 'EXPECTED',
+          exception: l.exception || null,
+          receivedBy: l.received_by || null, receivedAt: l.received_at || null,
+          clientRequestId: l.client_request_key || null
+        };
+      });
+    var exs = (exRows || []).filter(function (e) { return e.receipt_id === r.id; })
+      .map(function (e) {
+        return { id: e.id, receiptId: e.receipt_id, lineId: e.line_id || null,
+          type: e.type, notes: e.notes || '', by: e.created_by || '', at: e.created_at };
+      });
+    return {
+      id: r.id, number: r.number, warehouseId: r.warehouse_id,
+      supplier: r.supplier || '', referenceNumber: r.reference_number || '',
+      status: r.status || 'EXPECTED',
+      expectedDate: r.expected_date || null, notes: r.notes || '',
+      createdBy: r.created_by || '', createdAt: r.created_at,
+      completedBy: r.completed_by || null, completedAt: r.completed_at || null,
+      clientRequestKey: r.client_request_key || null,
+      lines: lines, exceptions: exs
+    };
+  },
   /* ---- inventory assignments ---- */
   rowToAssignment: function (r) {
     return {
@@ -463,7 +534,8 @@ var Mappers = {
   /* ---- documents (history cards) ---- */
   rowToDocument: function (r) {
     return {
-      id: r.id, rollId: r.roll_id, kind: 'HISTORY_CARD',
+      id: r.id, rollId: r.roll_id || null, receiptId: r.receipt_id || null,
+      kind: r.receipt_id ? 'RECEIPT_DOCUMENT' : 'HISTORY_CARD',
       docType: r.document_type || 'HISTORY CARD',
       employee: r.employee_name || '', at: r.captured_at,
       location: r.location_code || null, sessionId: r.session_id || null,
@@ -523,6 +595,32 @@ var LocalRepo = {
   cancelSalesOrder: function (soId, reason, opts) { return Promise.resolve(cancelSalesOrderLocal(soId, reason, opts)); },
   /* ---- Run 6 §0: reopen a completed warehouse job ---- */
   reopenWarehouseWork: function (woId, reason) { return Promise.resolve(reopenWarehouseWorkLocal(woId, reason)); },
+  /* ---- Run 7: loadout + receipts (local simulated central numbering) ---- */
+  issueBusinessNumber: function (kind, requestKey) {
+    /* Local Demo simulates the central issuer: same kind vocabulary as the
+       backend, idempotent on the request key. */
+    var map = { ORD: 'order', SO: 'sales_order', WO: 'work_order', RCV: 'receipt', LOAD: 'loadout' };
+    var seen = LocalRepo._numKeys || (LocalRepo._numKeys = {});
+    if (requestKey && seen[requestKey]) return Promise.resolve(seen[requestKey]);
+    var n = nextLocalBusinessNumber(map[kind] || kind);
+    if (requestKey) seen[requestKey] = n;
+    return Promise.resolve(n);
+  },
+  getLoadouts: function () { return Promise.resolve(getLoadoutsLocal()); },
+  getLoadout: function (id) { return Promise.resolve(loadoutById(id)); },
+  startLoadout: function (woId) { return Promise.resolve(startLoadoutLocal(woId)); },
+  beginLoading: function (loId) { return Promise.resolve(beginLoadingLocal(loId)); },
+  verifyLoadoutLine: function (loId, lineId, code) { return Promise.resolve(verifyLoadoutLineLocal(loId, lineId, code)); },
+  markLoadoutLineLoaded: function (loId, lineId) { return Promise.resolve(markLoadoutLineLoadedLocal(loId, lineId)); },
+  createLoadoutException: function (loId, lineId, type, notes) { return Promise.resolve(createLoadoutExceptionLocal(loId, lineId, type, notes)); },
+  completeLoadout: function (loId) { return Promise.resolve(completeLoadoutLocal(loId)); },
+  getReceipts: function () { return Promise.resolve(getReceiptsLocal()); },
+  getReceipt: function (id) { return Promise.resolve(receiptById(id)); },
+  createReceipt: function (o) { return Promise.resolve(createReceiptLocal(o)); },
+  addReceiptLine: function (rcId, line) { return Promise.resolve(addReceiptLineLocal(rcId, line)); },
+  receiveRoll: function (rcId, o) { return Promise.resolve(receiveRollLocal(rcId, o)); },
+  createReceiptException: function (rcId, type, notes) { return Promise.resolve(createReceiptExceptionLocal(rcId, type, notes)); },
+  completeReceipt: function (rcId) { return Promise.resolve(completeReceiptLocal(rcId)); },
   getRoll: function (id) { return Promise.resolve(rollById(id)); },
   getRollHistory: function (id) { return Promise.resolve(buildLocalRollHistory(id)); },
   recordCut: function (o) { return Promise.resolve(CutService.recordCut(o)); },
@@ -609,6 +707,25 @@ var LocalRepo = {
     return Promise.resolve({ ok: true, doc: rec });
   },
   getDocumentsForRoll: function (rollId) { return Promise.resolve(docsForRoll(rollId)); },
+  uploadReceiptDocument: function (o) {
+    /* o: {receiptId, imageDataUrl, thumbDataUrl, mimeType, employee} */
+    var now = new Date();
+    var rec = {
+      id: rid('D'), rollId: null, barcode: null, raw: null, discovered: false,
+      kind: 'RECEIPT_DOCUMENT', docType: 'RECEIVING DOCUMENT',
+      image: o.imageDataUrl || null, thumb: o.thumbDataUrl || o.imageDataUrl || null,
+      employee: o.employee || DB.data.currentEmployee,
+      at: now.toISOString(), date: now.toLocaleDateString(), time: fmtTime(now.toISOString()),
+      location: null, source: 'LOCAL', num: receiptDocuments(o.receiptId).length + 1,
+      imports: [], receiptId: o.receiptId, sessionId: null
+    };
+    FG().documents.push(rec);
+    DB.save();
+    return Promise.resolve({ ok: true, doc: rec });
+  },
+  getDocumentsForReceipt: function (receiptId) {
+    return Promise.resolve(receiptDocuments(receiptId));
+  },
   createDiscrepancy: function (o) {
     var rec = {
       id: rid('X'), rollId: o.rollId, kind: o.kind || 'COUNT',
@@ -933,7 +1050,7 @@ var SharedRepo = {
     h = h || {};
     var now = isoNow();
     var o = {
-      id: rid('ORD'), number: nextOrderNumber(),
+      id: rid('ORD'), number: null, /* issued by the backend below */
       property: String(h.property).trim(),
       account: String(h.account || accountForProperty(h.property) || '').trim(),
       requestedDate: h.requestedDate || null, scheduledDate: h.scheduledDate || null,
@@ -942,12 +1059,23 @@ var SharedRepo = {
       notes: String(h.notes || '').trim(), status: 'DRAFT', items: [],
       createdAt: now, updatedAt: now, submittedAt: null, salesOrderId: null
     };
-    return self._post('orders', [Mappers.orderToRow(o)])
-      .then(function () { return self._orderAudit('ORDER_CREATED', { orderId: o.id }, { number: o.number }); })
-      .then(function () {
-        FG().orders.push(o); DB.save();
-        logOrderEvent('ORDER_CREATED', { orderId: o.id, orderNumber: o.number });
-        return { ok: true, order: o };
+    /* Run 7: atomic create_order RPC — the ORD number is issued inside the
+       same transaction that inserts the order, so a failed insert can never
+       burn a number and a retried create returns the existing order. */
+    return self._rpc('create_order', {
+        p_order_id: o.id, p_warehouse_id: o.warehouseId, p_property: o.property,
+        p_account: o.account, p_requested_date: o.requestedDate,
+        p_scheduled_date: o.scheduledDate, p_priority: o.priority,
+        p_created_by: o.createdBy, p_internal_ref: o.internalRef, p_notes: o.notes
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        o.number = res.number;
+        return self._refreshOrders().then(function () {
+          var created = orderById(o.id) || o;
+          logOrderEvent('ORDER_CREATED', { orderId: o.id, orderNumber: o.number });
+          return { ok: true, order: created, duplicate: !!res.duplicate };
+        });
       });
   },
   getOrder: function (id) {
@@ -1107,9 +1235,10 @@ var SharedRepo = {
     }
     if (!orderEditable(o)) throw RepoError('INVALID_INPUT', 'Order is not submittable.');
     if (!(o.items || []).length) throw RepoError('INVALID_INPUT', 'Add at least one item.');
-    var soId = rid('SO'), number = nextSalesOrderNumber(), by = DB.data.currentEmployee;
+    var soId = rid('SO'), by = DB.data.currentEmployee;
+    /* Run 7: p_number null — the RPC issues the SO number server-side. */
     return self._rpc('submit_sales_order', {
-        p_order_id: id, p_sales_order_id: soId, p_number: number, p_submitted_by: by
+        p_order_id: id, p_sales_order_id: soId, p_number: null, p_submitted_by: by
       })
       .then(self._rpcResult)
       .then(function (res) {
@@ -1149,8 +1278,9 @@ var SharedRepo = {
     }
     var wo = buildWorkOrderFromLine(so, line);
     var wl = wo.lines[0];
+    /* Run 7: p_wo_number null — the RPC issues the WO number server-side. */
     return self._rpc('release_sales_order_line', {
-        p_line_id: lineId, p_work_order_id: wo.id, p_wo_number: wo.number,
+        p_line_id: lineId, p_work_order_id: wo.id, p_wo_number: null,
         p_style: wl.style, p_color: wl.color, p_material_type: wl.materialType,
         p_uom: wl.uom, p_width_in: wl.widthIn,
         p_required_in: wl.requiredIn, p_required_count: wl.requiredCount,
@@ -1172,6 +1302,263 @@ var SharedRepo = {
         });
       });
   },
+  /* ---- Run 7: central numbering + loadout + receipts ----
+     Every mutation fails fast offline (never queued, never a misleading
+     error) and enforces the centralized role policy before touching the
+     backend. Numbers are backend-issued; the browser never invents one. */
+  _refreshRun7: function () {
+    var self = this;
+    return self.hydrate().catch(function () { return null; /* offline: use cached */ })
+      .then(function () { return true; });
+  },
+  issueBusinessNumber: function (kind, requestKey) {
+    /* Run 7: direct counter access is revoked in the backend — every document
+       number is issued atomically inside its creating RPC (create_order,
+       submit_sales_order, release_sales_order_line, start_loadout,
+       create_receipt). This guard keeps any future caller from hitting a
+       raw permission error. */
+    var self = this;
+    self._requireOnline('OFFLINE — NUMBER NOT ISSUED');
+    return Promise.reject(RepoError('FORBIDDEN',
+      'Document numbers are issued by the backend inside their creating RPC.'));
+  },
+  getLoadouts: function () {
+    var self = this;
+    return self._refreshRun7().then(function () { return getLoadoutsLocal(); });
+  },
+  getLoadout: function (id) {
+    var self = this;
+    return self._refreshRun7().then(function () { return loadoutById(id); });
+  },
+  startLoadout: function (woId, opts) {
+    var self = this;
+    self._requireOnline('OFFLINE — LOADOUT NOT STARTED');
+    self._requireOrderPolicy(orderPolicy().canStartLoadout, 'Not authorized to start a loadout.');
+    /* Refresh first so the local readiness pre-check reflects current data;
+       the RPC re-checks readiness authoritatively server-side. */
+    return self._refreshRun7().then(function () {
+    opts = opts || {};
+    var w = woById(woId);
+    if (!w) throw RepoError('NOT_FOUND', 'Work order not found.');
+    var rd = loadoutReadiness(w);
+    if (!rd.ready && !rd.openLoadout)
+      throw RepoError('INVALID_INPUT', 'Loadout is not ready: ' +
+        rd.parts.filter(function (x) { return !x.r.ready; })
+          .map(function (x) { return x.r.reason; }).join('; '));
+    var loId = (rd.openLoadout && rd.openLoadout.id) || rid('LOAD');
+    var reqKey = opts.clientRequestId || ('startloadout-' + loId);
+    var lines = (w.lines || []).map(function (l) {
+      var part = rd.parts.filter(function (x) { return x.line.id === l.id; })[0];
+      var roll = part && part.r.roll;
+      return { style: l.style, color: l.color, material_type: l.materialType, uom: l.uom,
+        width_in: l.widthIn, required_in: l.requiredIn, required_count: l.requiredCount,
+        prepared_in: part ? part.r.preparedIn : null,
+        roll_id: roll ? roll.id : null,
+        barcode: roll ? (roll.barcode || roll.id) : null };
+    });
+    return self._rpc('start_loadout', {
+        p_loadout_id: loId, p_request_key: reqKey, p_work_order_id: woId,
+        p_by: DB.data.currentEmployee, p_lines: lines
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshRun7().then(function () {
+          var lo = loadoutById(res.loadout_id);
+          logOrderEvent('LOADOUT_STARTED', { loadoutId: res.loadout_id,
+            loadoutNumber: lo && lo.number, workOrderId: woId,
+            detail: 'Loadout ' + (lo && lo.number) + ' started by ' + DB.data.currentEmployee + '.' });
+          return { ok: true, loadout: lo, duplicate: !!res.duplicate };
+        });
+      });
+    });
+  },
+  beginLoading: function (loId) {
+    var self = this;
+    self._requireOnline('OFFLINE — LOADING NOT STARTED');
+    self._requireOrderPolicy(orderPolicy().canLoadMaterial, 'Not authorized to load material.');
+    return self._rpc('begin_loadout_loading', { p_loadout_id: loId, p_by: DB.data.currentEmployee })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshRun7().then(function () {
+          return { ok: true, loadout: loadoutById(loId), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  verifyLoadoutLine: function (loId, lineId, code) {
+    var self = this;
+    self._requireOnline('OFFLINE — LINE NOT VERIFIED');
+    self._requireOrderPolicy(orderPolicy().canVerifyLoadout, 'Not authorized to verify material.');
+    return self._rpc('verify_loadout_line', {
+        p_loadout_id: loId, p_line_id: lineId,
+        p_barcode: normalizeBarcode(String(code || '')), p_by: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        if (res.wrong_material)
+          throw RepoError('WRONG MATERIAL', 'Wrong material scanned — flagged as an exception.');
+        return self._refreshRun7().then(function () {
+          var lo = loadoutById(loId);
+          return { ok: true, line: lo && loadoutLineById(lo, lineId), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  markLoadoutLineLoaded: function (loId, lineId) {
+    var self = this;
+    self._requireOnline('OFFLINE — LINE NOT MARKED LOADED');
+    self._requireOrderPolicy(orderPolicy().canLoadMaterial, 'Not authorized to load material.');
+    return self._rpc('mark_loadout_line_loaded', {
+        p_loadout_id: loId, p_line_id: lineId, p_by: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshRun7().then(function () {
+          var lo = loadoutById(loId);
+          return { ok: true, line: lo && loadoutLineById(lo, lineId), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  createLoadoutException: function (loId, lineId, type, notes) {
+    var self = this;
+    self._requireOnline('OFFLINE — EXCEPTION NOT FLAGGED');
+    self._requireOrderPolicy(orderPolicy().canLoadMaterial, 'Not authorized.');
+    return self._rpc('create_loadout_exception', {
+        p_loadout_id: loId, p_line_id: lineId || '', p_type: type,
+        p_notes: String(notes || ''), p_by: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function () {
+        return self._refreshRun7().then(function () {
+          return { ok: true, loadout: loadoutById(loId) };
+        });
+      });
+  },
+  completeLoadout: function (loId) {
+    var self = this;
+    self._requireOnline('OFFLINE — LOADOUT NOT COMPLETED');
+    self._requireOrderPolicy(orderPolicy().canCompleteLoadout, 'Not authorized to complete a loadout.');
+    return self._rpc('complete_loadout', { p_loadout_id: loId, p_by: DB.data.currentEmployee })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshRun7().then(function () {
+          var lo = loadoutById(loId);
+          if (!res.duplicate)
+            logOrderEvent('LOADOUT_COMPLETED', { loadoutId: loId,
+              loadoutNumber: lo && lo.number, workOrderId: lo && lo.workOrderId,
+              detail: 'Loadout ' + (lo && lo.number) + ' completed.' });
+          return { ok: true, loadout: lo, duplicate: !!res.duplicate };
+        });
+      });
+  },
+  getReceipts: function () {
+    var self = this;
+    return self._refreshRun7().then(function () { return getReceiptsLocal(); });
+  },
+  getReceipt: function (id) {
+    var self = this;
+    return self._refreshRun7().then(function () { return receiptById(id); });
+  },
+  createReceipt: function (o) {
+    var self = this;
+    self._requireOnline('OFFLINE — RECEIPT NOT CREATED');
+    self._requireOrderPolicy(orderPolicy().canReceiveMaterial, 'Not authorized to receive material.');
+    o = o || {};
+    var rcId = rid('RCV');
+    var reqKey = o.clientRequestId || ('createreceipt-' + rcId);
+    return self._rpc('create_receipt', {
+        p_receipt_id: rcId, p_request_key: reqKey,
+        p_supplier: String(o.supplier || ''), p_reference: String(o.referenceNumber || ''),
+        p_expected: !!o.expected, p_notes: String(o.notes || ''),
+        p_by: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshRun7().then(function () {
+          return { ok: true, receipt: receiptById(res.receipt_id), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  addReceiptLine: function (rcId, line) {
+    var self = this;
+    self._requireOnline('OFFLINE — RECEIPT LINE NOT ADDED');
+    self._requireOrderPolicy(orderPolicy().canReceiveMaterial, 'Not authorized to receive material.');
+    line = line || {};
+    var reqKey = line.clientRequestId || rid('CRQ');
+    return self._rpc('add_receipt_line', {
+        p_receipt_id: rcId, p_line_id: rid('RL'), p_request_key: reqKey,
+        p_material_type: line.materialType || null, p_uom: line.uom || null,
+        p_style: String(line.style || ''), p_color: String(line.color || ''),
+        p_expected_qty_in: line.expectedQtyIn || null,
+        p_expected_qty: line.expectedQty || null,
+        p_notes: String(line.notes || '')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshRun7().then(function () {
+          return { ok: true, receipt: receiptById(rcId), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  receiveRoll: function (rcId, o) {
+    var self = this;
+    self._requireOnline('OFFLINE — ROLL NOT RECEIVED');
+    self._requireOrderPolicy(orderPolicy().canReceiveMaterial, 'Not authorized to receive material.');
+    o = o || {};
+    var reqKey = o.clientRequestId || rid('CRQ');
+    var barcode = normalizeBarcode(String(o.barcode || ''));
+    if (!barcode) throw RepoError('INVALID_INPUT', 'ROLL BARCODE REQUIRED');
+    if (!(Math.round(Number(o.lengthIn)) > 0)) throw RepoError('INVALID_INPUT', 'RECEIVED LENGTH REQUIRED');
+    if (!o.style && !o.supervisorOverride) throw RepoError('INVALID_INPUT', 'STYLE REQUIRED');
+    if (o.supervisorOverride)
+      self._requireOrderPolicy(orderPolicy().canReviewExceptions, 'Supervisor role required.');
+    return self._rpc('receive_roll', {
+        p_receipt_id: rcId, p_line_id: rid('RL'), p_request_key: reqKey,
+        p_barcode: barcode, p_roll_id: barcode,
+        p_style: String(o.style || ''), p_color: String(o.color || ''),
+        p_manufacturer: String(o.manufacturer || ''),
+        p_width_in: o.widthIn != null ? Number(o.widthIn) : null,
+        p_length_in: Math.round(Number(o.lengthIn)),
+        p_location_code: String(o.location || '').trim() || null,
+        p_by: DB.data.currentEmployee, p_override: !!o.supervisorOverride
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshRun7().then(function () {
+          if (res.duplicate_roll)
+            return { ok: true, receipt: receiptById(rcId),
+              roll: rollById(res.roll_id), duplicateRoll: true };
+          return { ok: true, receipt: receiptById(rcId),
+            line: null, roll: rollById(res.roll_id), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  createReceiptException: function (rcId, type, notes) {
+    var self = this;
+    self._requireOnline('OFFLINE — EXCEPTION NOT FLAGGED');
+    self._requireOrderPolicy(orderPolicy().canReceiveMaterial, 'Not authorized.');
+    return self._rpc('create_receipt_exception', {
+        p_receipt_id: rcId, p_line_id: '', p_type: type,
+        p_notes: String(notes || ''), p_by: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function () {
+        return self._refreshRun7().then(function () {
+          return { ok: true, receipt: receiptById(rcId) };
+        });
+      });
+  },
+  completeReceipt: function (rcId) {
+    var self = this;
+    self._requireOnline('OFFLINE — RECEIPT NOT COMPLETED');
+    self._requireOrderPolicy(orderPolicy().canCompleteReceipt, 'Not authorized to complete a receipt.');
+    return self._rpc('complete_receipt', { p_receipt_id: rcId, p_by: DB.data.currentEmployee })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshRun7().then(function () {
+          return { ok: true, receipt: receiptById(rcId), duplicate: !!res.duplicate };
+        });
+      });
+  },
+
   holdSalesOrder: function (soId, reason) {
     var self = this;
     self._requireOnline('OFFLINE — SALES ORDER NOT HELD');
@@ -1392,6 +1779,46 @@ var SharedRepo = {
       });
     });
   },
+  uploadReceiptDocument: function (o) {
+    /* o: {receiptId, imageDataUrl, mimeType, employee} — backend-authoritative:
+       image bytes go to private storage, the metadata row links receipt_id. */
+    var self = this;
+    self._requireOnline('OFFLINE — DOCUMENT NOT SAVED');
+    self._requireOrderPolicy(orderPolicy().canReceiveMaterial, 'Not authorized to receive material.');
+    var bytes = dataUrlToBytes(o.imageDataUrl);
+    if (!bytes) return Promise.reject(RepoError('INVALID_INPUT', 'No image data.'));
+    if (!o.receiptId) return Promise.reject(RepoError('INVALID_INPUT', 'RECEIPT REQUIRED'));
+    var wh = self.wh();
+    var path = wh + '/receipts/' + o.receiptId + '/' + rid('RD') + '.jpg';
+    return pgFetch('/storage/v1/object/history-cards/' + path, {
+      method: 'POST', body: bytes, contentType: o.mimeType || 'image/jpeg'
+    }).then(function () {
+      var row = {
+        id: rid('D'), roll_id: null, receipt_id: o.receiptId, warehouse_id: wh,
+        storage_path: path, document_type: 'RECEIVING DOCUMENT',
+        employee_name: o.employee || DB.data.currentEmployee || null,
+        captured_at: isoNow(), mime_type: o.mimeType || 'image/jpeg',
+        byte_size: bytes.length
+      };
+      return self._post('documents', [row]).then(function () {
+        return { row: row, path: path };
+      });
+    }).then(function (up) {
+      return self._refreshRun7().then(function () { return up; });
+    }).then(function (up) {
+      var doc = Mappers.rowToDocument({
+        id: up.row.id, roll_id: null, receipt_id: o.receiptId,
+        document_type: 'RECEIVING DOCUMENT', employee_name: o.employee || null,
+        captured_at: isoNow(), storage_path: up.path });
+      doc.image = o.imageDataUrl || null;
+      return { ok: true, doc: doc };
+    });
+  },
+  getDocumentsForReceipt: function (receiptId) {
+    var self = this;
+    return self._get('documents', { receipt_id: 'eq.' + receiptId, select: '*' })
+      .then(function (rows) { return rows.map(Mappers.rowToDocument); });
+  },
   getDocumentsForRoll: function (rollId) {
     var self = this;
     /* Metadata only — the image bytes stay in private storage until the doc
@@ -1475,14 +1902,21 @@ var SharedRepo = {
       /* Run 6: commercial layer. order_items / sales_order_lines carry no
          warehouse_id — they are scoped to their parent order's warehouse. */
       get('orders'), self._get('order_items', { select: '*' }),
-      get('sales_orders'), self._get('sales_order_lines', { select: '*' })
+      get('sales_orders'), self._get('sales_order_lines', { select: '*' }),
+      /* Run 7: loadout + receipts + central numbering. */
+      get('loadouts'), self._get('loadout_lines', { select: '*' }),
+      self._get('loadout_exceptions', { select: '*' }),
+      get('receipts'), self._get('receipt_lines', { select: '*' }),
+      self._get('receipt_exceptions', { select: '*' })
     ]).then(function (p) {
       var warehouses = p[0], users = p[1], rollRows = p[2], woRows = p[3],
           lineRows = p[4], asnRows = p[5], cutRows = p[6], sessRows = p[7],
           countRows = p[8], histRows = p[9], docRows = p[10], impRows = p[11],
           discRows = p[12], auditRows = p[13],
           orderRows = p[14], orderItemRows = p[15],
-          soRows = p[16], soLineRows = p[17];
+          soRows = p[16], soLineRows = p[17],
+          loRows = p[18], loLineRows = p[19], loExRows = p[20],
+          rcRows = p[21], rcLineRows = p[22], rcExRows = p[23];
       var fg = FG();
       /* warehouses + employees */
       var roleMap = { WAREHOUSE_EMPLOYEE: 'WORKER', SUPERVISOR: 'SUPERVISOR', MANAGER: 'MANAGER', ADMIN: 'ADMIN' };
@@ -1539,6 +1973,20 @@ var SharedRepo = {
       /* Run 6: commercial layer joins the local mirror. */
       fg.orders = (orderRows || []).map(function (r) { return Mappers.rowToOrder(r, orderItemRows); });
       fg.salesOrders = (soRows || []).map(function (r) { return Mappers.rowToSalesOrder(r, soLineRows); });
+      /* Run 7: loadout + receipts join the local mirror. */
+      fg.loadouts = (loRows || []).map(function (r) { return Mappers.rowToLoadout(r, loLineRows, loExRows); });
+      fg.receipts = (rcRows || []).map(function (r) { return Mappers.rowToReceipt(r, rcLineRows, rcExRows); });
+      /* Run 7: receipt audit rows join the local receipt-activity feed so
+         receiving from other devices appears after a refresh. */
+      fg.receiptEvents = (auditRows || []).filter(function (r) { return r.entity_type === 'receipt'; })
+        .map(function (r) {
+          var nv = r.new_value;
+          if (typeof nv === 'string') { try { nv = JSON.parse(nv); } catch (e) { nv = null; } }
+          return { id: 'AE-' + r.id, receiptId: r.entity_id, action: r.action,
+            user: r.user_name || '', at: r.created_at,
+            rollId: (nv && nv.roll_id) || null,
+            detail: (nv && nv.barcode) ? ('Roll ' + nv.barcode) : '' };
+        });
       migrateFloorguardV4toV5(); /* ensure seq counters exist on the mirror */
       /* Run 5: work-order audit rows join the local WO activity feed so
          holds, notes, assignments, and completions from other devices
@@ -1747,7 +2195,14 @@ var SERVICE_METHODS = [
   'updateOrderItem', 'removeOrderItem', 'getDraftOrders',
   'getRecentSubmittedOrders', 'markOrderReady', 'submitOrder', 'deleteOrder',
   'getSalesOrders', 'getSalesOrder', 'releaseSalesOrderLine',
-  'holdSalesOrder', 'resumeSalesOrder', 'cancelSalesOrder'
+  'holdSalesOrder', 'resumeSalesOrder', 'cancelSalesOrder',
+  /* Run 7: central numbering + loadout + receipts */
+  'issueBusinessNumber',
+  'getLoadouts', 'getLoadout', 'startLoadout', 'beginLoading',
+  'verifyLoadoutLine', 'markLoadoutLineLoaded', 'createLoadoutException', 'completeLoadout',
+  'getReceipts', 'getReceipt', 'createReceipt', 'addReceiptLine',
+  'receiveRoll', 'createReceiptException', 'completeReceipt',
+  'uploadReceiptDocument', 'getDocumentsForReceipt'
 ];
 var Repository = {
   mode: 'local',

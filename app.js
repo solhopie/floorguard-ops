@@ -25,7 +25,7 @@ function daypart() {
   return 'evening';
 }
 
-var APP_VERSION = '0.6.0';
+var APP_VERSION = '0.7.0';
 
 /* ---------------- data layer ----------------
    One localStorage key, schema version, per-module namespaces.
@@ -33,11 +33,11 @@ var APP_VERSION = '0.6.0';
    through DB.ns('<module-key>'). */
 var DB = {
   KEY: 'floorguard_ops_v1',
-  SCHEMA: 5,
+  SCHEMA: 6,
   data: null,
   seed: function () {
     return {
-      schema: 5,
+      schema: 6,
       currentEmployee: null,
       employees: ['Marcus', 'Dana', 'Luis'],
       employeeRoles: { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' },
@@ -55,16 +55,24 @@ var DB = {
       var raw = localStorage.getItem(this.KEY);
       if (raw) {
         var d = JSON.parse(raw);
-        if (d && d.schema === 5) { this.data = d; ensureFloorguardStore(); return; }
+        if (d && d.schema === 6) { this.data = d; ensureFloorguardStore(); return; }
+        if (d && d.schema === 5) {
+          /* v5 -> v6: Run 7. Loadout + receipt collections, central document
+             numbering counters. No existing data is touched. */
+          d.schema = 6;
+          this.data = d;
+          migrateFloorguardV5toV6();
+          this.save();
+          return;
+        }
         if (d && d.schema === 4) {
-          /* v4 -> v5: Run 6. Explicit warehouse timezone (America/New_York
-             default — the pilot warehouse's real zone; never the browser's).
-             Run 6 order collections are initialized by ensureFloorguardStore. */
+          /* v4 -> v5 -> v6: Run 6 order collections + timezone, then Run 7. */
           (d.warehouses || []).forEach(function (w) { if (!w.timezone) w.timezone = 'America/New_York'; });
-          d.schema = 5;
+          d.schema = 6;
           this.data = d;
           migrateFloorguardV3toV4();
           migrateFloorguardV4toV5();
+          migrateFloorguardV5toV6();
           this.save();
           return;
         }
@@ -72,29 +80,30 @@ var DB = {
           /* v3 -> v4 -> v5: Run 5 scheduled-job fields, then Run 6 order
              collections + explicit warehouse timezone. */
           (d.warehouses || []).forEach(function (w) { if (!w.timezone) w.timezone = 'America/New_York'; });
-          d.schema = 5;
+          d.schema = 6;
           this.data = d;
           migrateFloorguardV3toV4();
           migrateFloorguardV4toV5();
+          migrateFloorguardV5toV6();
           this.save();
           return;
         }
         if (d && d.schema === 2) {
-          /* v2 -> v3: Run 3 inventory assignment collections + work-order
-             material lines. Existing roll links and balances are untouched. */
+          /* v2 -> v3 -> ... -> v6 */
           d.schema = 3;
           this.data = d;
           migrateFloorguardV2toV3();
           migrateFloorguardV3toV4();
           migrateFloorguardV4toV5();
-          d.schema = 5;
+          migrateFloorguardV5toV6();
+          d.schema = 6;
           this.save();
           return;
         }
         if (d && d.schema === 1) {
           /* v1 -> v2: add warehouse context + roles, seed the shared
              FloorGuard inventory store. Run 1 session data is kept. */
-          d.schema = 5;
+          d.schema = 6;
           if (!d.warehouses) d.warehouses = [{ id: 'main', name: 'Main Warehouse', timezone: 'America/New_York' }];
           if (!d.currentWarehouse) d.currentWarehouse = 'main';
           if (!d.employeeRoles) d.employeeRoles = { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' };
@@ -102,6 +111,7 @@ var DB = {
           migrateFloorguardV2toV3();
           migrateFloorguardV3toV4();
           migrateFloorguardV4toV5();
+          migrateFloorguardV5toV6();
           this.save();
           return;
         }
@@ -410,6 +420,7 @@ function ensureFloorguardStore() {
     DB.save();
   }
   migrateFloorguardV4toV5();
+  migrateFloorguardV5toV6();
 }
 
 /* Run 6 (schema 5): order / sales-order collections on existing stores.
@@ -1150,6 +1161,8 @@ var NAV = [
     { route: 'sales-orders',      label: 'Sales Orders',      icon: '📦' },
     { route: 'assign-inventory',  label: 'Assign Inventory',  icon: '🗂️' },
     { route: 'cut-roll-tracking', label: 'Cut / Roll Tracking', icon: '✂️' },
+    { route: 'loadout',           label: 'Loadout',           icon: '🚚' },
+    { route: 'receipts',          label: 'Receipts',          icon: '📥' },
     { route: 'cycle-count',       label: 'Cycle Count',       icon: '🔄' },
     { route: 'balance',           label: 'Balance',           icon: '⚖️' },
     { route: 'history',           label: 'History',           icon: '📜' }
@@ -1185,6 +1198,10 @@ var MODULE_INFO = {
     points: ['Work order -> material line -> roll reservation', 'Material match / mismatch checks', 'Over-reservation guard', 'Reservation lifecycle: RESERVED / RELEASED / CONSUMED'] },
   'cut-roll-tracking': { icon: '✂️', title: 'Cut / Roll Tracking',
     points: ['Scan Roll', 'Current Balance', 'Work Order', 'Cut amount', 'Permanent cut history per roll'] },
+  'loadout':           { icon: '🚚', title: 'Loadout',
+    points: ['READY / IN PROGRESS / LOADED / COMPLETED queue', 'Scan-to-verify material against the work order', 'Mark loaded per line', 'Exceptions with supervisor review'] },
+  'receipts':          { icon: '📥', title: 'Receipts',
+    points: ['Expected + free/manual warehouse receipts', 'Scan roll barcode to receive new carpet rolls', 'Location assignment', 'Duplicate-roll protection', 'History-card capture at receiving'] },
   'cycle-count':       { icon: '🔄', title: 'Cycle Count',
     points: ['Standard Cycle Count', 'Free Run / Discovery Mode', 'Rapid Cycle Count',
              'Location scanning', 'Roll scanning', 'Measured Balance',
@@ -1488,6 +1505,7 @@ Screens.dashboard = function () {
     }).join('') + '</div>';
   }
   var wh = ['work-orders', 'sales-orders', 'assign-inventory', 'cut-roll-tracking',
+            'loadout', 'receipts',
             'cycle-count', 'balance', 'history'];
   var ops = ['scheduled-jobs', 'returns', 'qa-warranty', 'reports'];
   /* Run 5: dashboard queue cards from scheduled-job data. */
@@ -1515,6 +1533,18 @@ Screens.dashboard = function () {
       '<span class="qnum">' + salesOrdersByTab('OPEN').length + '</span><span class="qlabel">Open Sales Orders</span></button>' +
     '<button class="qcard" data-croute="sales-orders/RELEASED">' +
       '<span class="qnum">' + salesOrdersByTab('RELEASED').length + '</span><span class="qlabel">Released to Warehouse</span></button>' +
+    '</div>' +
+    /* Run 7: material movement — ready loadouts, active loadouts, receipts today, receipt exceptions. */
+    '<div class="sect">MATERIAL MOVEMENT</div>' +
+    '<div class="qcards">' +
+    '<button class="qcard" data-croute="loadout/READY">' +
+      '<span class="qnum">' + readyLoadoutWOs().length + '</span><span class="qlabel">Ready to Load</span></button>' +
+    '<button class="qcard" data-croute="loadout/IN PROGRESS">' +
+      '<span class="qnum">' + loadoutsByTab('IN PROGRESS').length + '</span><span class="qlabel">Loadouts In Progress</span></button>' +
+    '<button class="qcard" data-croute="receipts/RECEIVING">' +
+      '<span class="qnum">' + receiptsToday().length + '</span><span class="qlabel">Receipts Today</span></button>' +
+    '<button class="qcard" data-croute="receipts/EXCEPTIONS">' +
+      '<span class="qnum">' + receiptsByTab('EXCEPTIONS').length + '</span><span class="qlabel">Receipt Exceptions</span></button>' +
     '</div>';
   return {
     html:
@@ -1919,6 +1949,31 @@ Screens['work-orders'] = function (param) {
   }};
 };
 
+/* Run 7: Work Order -> Loadout section. Shows readiness, the open loadout
+   (if any), and past loadouts with VIEW LOADOUT. */
+function loadoutSectionHtml(w) {
+  var los = loadoutsForWO(w.id);
+  var rd = loadoutReadiness(w);
+  var h = '';
+  if (los.length) {
+    h += los.map(function (lo) {
+      return '<button class="rowbtn" data-woloadout="' + esc(lo.id) + '">' +
+        '<div class="rhead"><b class="mono">' + esc(lo.number) + '</b> ' + loadoutStatusChip(lo.status) + '</div>' +
+        '<div class="sub">' + (lo.lines || []).filter(function (l) { return l.status === 'LOADED'; }).length +
+        '/' + (lo.lines || []).length + ' lines loaded' +
+        (lo.completedAt ? ' · completed ' + fmtDT(lo.completedAt) : '') + '</div></button>';
+    }).join('');
+  }
+  if (!rd.openLoadout && rd.ready && orderPolicy().canStartLoadout) {
+    h += '<button class="btn btn-primary" id="wo-startloadout">START LOADOUT</button>';
+  } else if (!rd.openLoadout && !rd.ready && (w.lines || []).length) {
+    var why = rd.parts.filter(function (x) { return !x.r.ready; })
+      .map(function (x) { return 'Line ' + (x.line.seq || x.line.id) + ': ' + x.r.reason; }).join('; ');
+    h += '<p class="hint">Not ready for loadout — ' + esc(why) + '.</p>';
+  }
+  if (!h) h = '<p class="hint">No loadout yet.</p>';
+  return h;
+}
 Screens['work-order'] = function (param) {
   var w = woById(param);
   if (!w) { setTimeout(function () { go('work-orders'); }, 0); return { html: '' }; }
@@ -2011,6 +2066,7 @@ Screens['work-order'] = function (param) {
           '<div class="sub">' + esc(e.user) + '<br>' + fmtDT(e.at) + '</div></div>';
       }).join('') : '<p class="hint">No inventory assignments yet.</p>';
     })() +
+    '<h2>Loadout</h2>' + loadoutSectionHtml(w) +
     '<button class="btn btn-primary btn-huge" id="wo-cut">✂️ CUT ROLL FOR THIS ORDER</button>' +
     '<button class="btn btn-primary btn-huge" id="wo-inv">🗂️ CONTINUE TO INVENTORY</button>' +
     '</div>';
@@ -2019,6 +2075,16 @@ Screens['work-order'] = function (param) {
     if ($('#goroll')) $('#goroll').onclick = function () { go('roll', w.rollId); };
     if ($('#wo-so')) $('#wo-so').onclick = function () { go('sales-order', w.salesOrderId); };
     $('#wo-sj').onclick = function () { go('scheduled-job/' + w.id); };
+    /* Run 7: loadout buttons on the WO detail. */
+    if ($('#wo-startloadout')) $('#wo-startloadout').onclick = function () {
+      run6Call(Repository.startLoadout(w.id), function (res) {
+        good(); toast('Loadout ' + res.loadout.number + ' started.');
+        go('loadout/detail', res.loadout.id);
+      }, function (err) { bad(); toast((err && err.message) || 'Could not start loadout.'); });
+    };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-woloadout]'), function (b) {
+      b.onclick = function () { go('loadout/detail', b.getAttribute('data-woloadout')); };
+    });
     $('#wo-assign').onclick = function () {
       w.assigneeId = $('#wo-emp').value || null;
       DB.save(); good(); render();
@@ -2162,6 +2228,9 @@ function sjMatches(wo, q) {
     .concat((wo.lines || []).map(function (l) { return (l.style || '') + ' ' + (l.color || '') + ' ' + (l.materialType || ''); }))
     .concat((FG().inventoryAssignments || []).filter(function (a) { return a.workOrderId === wo.id; })
       .map(function (a) { return a.rollId || ''; }))
+    /* Run 7: the job's loadouts are searchable by loadout number and status. */
+    .concat((FG().loadouts || []).filter(function (lo) { return lo.workOrderId === wo.id; })
+      .map(function (lo) { return lo.number + ' ' + lo.status; }))
     .join(' ').toUpperCase();
   return hay.indexOf(q) !== -1;
 }
@@ -2407,6 +2476,27 @@ Screens['scheduled-jobs'] = function (param) {
 
 /* Job detail: scheduling-focused view of one work order. Reuses the Work
    Order record — no duplicate job database. */
+/* Run 7: loadout status on the scheduled-job detail. Derived — the job's
+   loadout (if any) plus readiness when no loadout is open yet. */
+function sjLoadoutHtml(w) {
+  var lo = openLoadoutForWO(w.id);
+  var rd = loadoutReadiness(w);
+  var h = '<div class="card">';
+  if (lo) {
+    var nL = (lo.lines || []).filter(function (l) { return l.status === 'LOADED'; }).length;
+    h += '<div class="kv"><span class="k">Loadout</span><span class="v mono">' + esc(lo.number) + '</span></div>' +
+      '<div class="kv"><span class="k">Status</span><span class="v">' + loadoutStatusChip(lo.status) + '</span></div>' +
+      '<div class="kv"><span class="k">Progress</span><span class="v num">' + nL + '/' + (lo.lines || []).length + ' loaded</span></div>' +
+      '</div><button class="btn btn-primary" id="sj-loadout">VIEW LOADOUT</button>';
+  } else if (rd.ready) {
+    h += '<div class="kv"><span class="k">Status</span><span class="v"><span class="stchip st-green">READY TO LOAD</span></span></div></div>';
+    if (orderPolicy().canStartLoadout)
+      h += '<button class="btn btn-primary" id="sj-startloadout">START LOADOUT</button>';
+  } else {
+    h += '<div class="kv"><span class="k">Status</span><span class="v hint">Cut not complete — no loadout yet.</span></div></div>';
+  }
+  return h;
+}
 Screens['scheduled-job'] = function (param) {
   var w = woById(param);
   if (!w) { setTimeout(function () { go('scheduled-jobs'); }, 0); return { html: '' }; }
@@ -2484,6 +2574,7 @@ Screens['scheduled-job'] = function (param) {
     '<h2>Material lines</h2>' + (linesHtml || '<p class="hint">No material lines.</p>') +
     '<h2>Inventory assignments</h2><div class="card">' + asnHtml + '</div>' +
     '<h2>Cut status</h2><div class="card">' + cutsHtml + '</div>' +
+    '<h2>Loadout</h2>' + sjLoadoutHtml(w) +
     '<h2>Actions</h2><div class="card">' +
       '<div class="btn-row">' +
       (w.opStatus !== 'IN_PROGRESS' && r !== JOB_STATES.COMPLETED ? '<button class="btn" id="sj-start" style="flex:1">▶ START WORK</button>' : '') +
@@ -2533,6 +2624,17 @@ Screens['scheduled-job'] = function (param) {
     $('#back').onclick = function () { go('scheduled-jobs', sjState().tab); };
     $('#sj-qa').onclick = function () { go(qa.route); };
     $('#sj-wo').onclick = function () { go('work-order/' + w.id); };
+    /* Run 7: loadout actions from the job detail. */
+    if ($('#sj-loadout')) $('#sj-loadout').onclick = function () {
+      var lo = openLoadoutForWO(w.id) || loadoutsForWO(w.id)[0];
+      if (lo) go('loadout/detail', lo.id);
+    };
+    if ($('#sj-startloadout')) $('#sj-startloadout').onclick = function () {
+      run6Call(Repository.startLoadout(w.id), function (res) {
+        good(); toast('Loadout ' + res.loadout.number + ' started.');
+        go('loadout/detail', res.loadout.id);
+      }, function (err) { bad(); toast((err && err.message) || 'Could not start loadout.'); });
+    };
     var st = $('#sj-start');
     if (st) st.onclick = function () { afterMutation(Repository.startWarehouseWork(w.id), 'Work started.'); };
     var hd = $('#sj-hold');
@@ -2633,7 +2735,17 @@ function orderPolicy() {
     canReleaseLine: sup,          /* release eligible warehouse lines */
     canHoldSalesOrder: mgr,       /* hold / resume */
     canCancelSalesOrder: mgr,     /* cancel where safe */
-    canReopenWarehouseJob: sup    /* Run 6 §0: reopen completed warehouse job */
+    canReopenWarehouseJob: sup,    /* Run 6 §0: reopen completed warehouse job */
+    /* Run 7: loadout + receipts. Normal warehouse flow is open to every
+       signed-in employee; exception review and mismatch overrides stay
+       with supervisors and above. */
+    canReceiveMaterial: !!role,   /* create receipts, receive rolls, assign locations */
+    canVerifyLoadout: !!role,     /* scan-to-verify during loadout */
+    canLoadMaterial: !!role,      /* mark verified lines loaded */
+    canStartLoadout: !!role,      /* start a loadout / begin loading */
+    canCompleteReceipt: !!role,   /* complete a receipt when guards pass */
+    canCompleteLoadout: !!role,   /* complete a loadout when guards pass */
+    canReviewExceptions: sup      /* review/acknowledge loadout + receipt exceptions */
   };
 }
 function orderPolicyRequire(ok, err) {
@@ -2685,7 +2797,9 @@ function logOrderEvent(action, o) {
 function orderEventsFor(o) {
   o = o || {};
   return ((FG() && FG().orderEvents) || []).filter(function (e) {
-    return (o.orderId && e.orderId === o.orderId) || (o.salesOrderId && e.salesOrderId === o.salesOrderId);
+    return (o.orderId && e.orderId === o.orderId) ||
+           (o.salesOrderId && e.salesOrderId === o.salesOrderId) ||
+           (o.workOrderId && e.workOrderId === o.workOrderId);
   }).sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
 }
 var ORDER_EVENT_LABELS = {
@@ -3097,6 +3211,625 @@ function cancelSalesOrderLocal(soId, reason, opts) {
     detail: reason + (wos.length ? ' (' + wos.length + ' work order(s) already existed — preserved).' : '') });
   return { ok: true, salesOrder: so };
 }
+
+/* ======================================================================
+   RUN 7: LOADOUT + RECEIPTS + CENTRALIZED DOCUMENT NUMBERING.
+   Warehouse material movement:
+     RECEIPT -> WAREHOUSE INVENTORY -> WORK ORDER -> ASSIGN INVENTORY
+       -> CUT / PICK -> LOADOUT -> JOB LEAVES WAREHOUSE
+   Rules:
+   - Document numbers are centrally issued. Local Demo keeps a safe
+     single-device simulation; Shared Pilot uses the backend
+     generate_business_number RPC (database sequences) — the UI never
+     invents authoritative numbers in shared mode.
+   - Loadout readiness is DERIVED from work-order material lines +
+     consumed inventory assignments (cut complete) — never stored.
+   - Receipts are atomic: receive-new-roll creates the receipt line, the
+     roll, its initial balance, the location, and the history event in one
+     validated step. A retried tap returns the existing line (duplicate).
+   - Marking material loaded never touches roll balances — the balance
+     already changed when the cut occurred.
+   - Role policy stays centralized in orderPolicy() (extended below).
+   ====================================================================== */
+
+var LOADOUT_STATUS = { READY: 'READY', IN_PROGRESS: 'IN_PROGRESS', LOADED: 'LOADED',
+  COMPLETED: 'COMPLETED', ON_HOLD: 'ON_HOLD' };
+var LOADOUT_LINE_STATUS = { WAITING: 'WAITING', VERIFIED: 'VERIFIED', LOADED: 'LOADED', EXCEPTION: 'EXCEPTION' };
+var RECEIPT_STATUS = { EXPECTED: 'EXPECTED', RECEIVING: 'RECEIVING', RECEIVED: 'RECEIVED', EXCEPTION: 'EXCEPTIONS' };
+var RECEIPT_LINE_STATUS = { EXPECTED: 'EXPECTED', RECEIVED: 'RECEIVED', EXCEPTION: 'EXCEPTION' };
+var LOADOUT_EXCEPTION_TYPES = ['MATERIAL MISSING', 'WRONG MATERIAL', 'DAMAGED MATERIAL', 'QUANTITY ISSUE', 'OTHER'];
+var RECEIPT_EXCEPTION_TYPES = ['SHORT RECEIPT', 'OVER RECEIPT', 'DAMAGED', 'UNKNOWN PRODUCT',
+  'DUPLICATE ROLL', 'WRONG LOCATION', 'OTHER'];
+
+/* ---------- centralized document numbering ---------- */
+/* Local Demo: safe simulated numbering (single device, FG().seq).
+   Shared Pilot: authoritative numbers come from the backend
+   generate_business_number RPC — see repository.js SharedRepo. */
+var DOC_NUMBER_KINDS = {
+  order:      { prefix: 'ORD-',  seqKey: 'order',      base: 1002 },
+  sales_order:{ prefix: 'SO-',   seqKey: 'salesOrder', base: 100246 },
+  work_order: { prefix: 'WO-',   seqKey: 'workOrder',  base: 2001 },
+  receipt:    { prefix: 'RCV-',  seqKey: 'receipt',    base: 100001 },
+  loadout:    { prefix: 'LOAD-', seqKey: 'loadout',    base: 100001 }
+};
+function nextLocalBusinessNumber(kind) {
+  var def = DOC_NUMBER_KINDS[kind];
+  if (!def) throw new Error('UNKNOWN DOCUMENT KIND: ' + kind);
+  var s = FG().seq || (FG().seq = {});
+  s[def.seqKey] = s[def.seqKey] || def.base;
+  return def.prefix + (s[def.seqKey]++);
+}
+/* Run 6 numbering now routes through the central issuer (local sim). */
+function nextOrderNumber() { return nextLocalBusinessNumber('order'); }
+function nextSalesOrderNumber() { return nextLocalBusinessNumber('sales_order'); }
+function nextGeneratedWoNumber() { return nextLocalBusinessNumber('work_order'); }
+function nextReceiptNumber() { return nextLocalBusinessNumber('receipt'); }
+function nextLoadoutNumber() { return nextLocalBusinessNumber('loadout'); }
+
+/* ---------- Run 7 collections (schema 6) ---------- */
+function migrateFloorguardV5toV6() {
+  var fg = DB.data.modules['floorguard'];
+  if (!fg) return;
+  if (!fg.loadouts) fg.loadouts = [];
+  if (!fg.receipts) fg.receipts = [];
+  if (!fg.loadoutEvents) fg.loadoutEvents = [];
+  if (!fg.receiptEvents) fg.receiptEvents = [];
+  var s = fg.seq || (fg.seq = {});
+  if (!s.receipt) s.receipt = DOC_NUMBER_KINDS.receipt.base;
+  if (!s.loadout) s.loadout = DOC_NUMBER_KINDS.loadout.base;
+}
+
+/* ---------- reads ---------- */
+function loadoutById(id) {
+  return ((FG() && FG().loadouts) || []).filter(function (l) { return l.id === id; })[0] || null;
+}
+function loadoutByNumber(num) {
+  var n = String(num || '').toUpperCase();
+  return ((FG() && FG().loadouts) || []).filter(function (l) { return String(l.number || '').toUpperCase() === n; })[0] || null;
+}
+/* The single open loadout for a work order (at most one open at a time). */
+function openLoadoutForWO(woId) {
+  return ((FG() && FG().loadouts) || []).filter(function (l) {
+    return l.workOrderId === woId && l.status !== LOADOUT_STATUS.COMPLETED;
+  })[0] || null;
+}
+function loadoutsForWO(woId) {
+  return ((FG() && FG().loadouts) || []).filter(function (l) { return l.workOrderId === woId; });
+}
+function getLoadoutsLocal() {
+  return (FG().loadouts || []).slice().sort(function (a, b) {
+    return new Date(b.updatedAt) - new Date(a.updatedAt);
+  });
+}
+function loadoutsByTab(tab) {
+  var key = String(tab || '').replace(/ /g, '_');
+  var open = getLoadoutsLocal().filter(function (l) { return l.status !== LOADOUT_STATUS.COMPLETED; });
+  var readyWOs = readyLoadoutWOs();
+  if (key === 'READY') {
+    return open.filter(function (l) { return l.status === LOADOUT_STATUS.READY; })
+      .concat(readyWOs.map(function (r) { return { woStub: true, wo: r.wo, readiness: r.readiness }; }));
+  }
+  if (key === 'IN_PROGRESS') return open.filter(function (l) { return l.status === LOADOUT_STATUS.IN_PROGRESS; });
+  if (key === 'LOADED') return open.filter(function (l) { return l.status === LOADOUT_STATUS.LOADED; });
+  if (key === 'COMPLETED') return getLoadoutsLocal().filter(function (l) { return l.status === LOADOUT_STATUS.COMPLETED; });
+  return open;
+}
+function receiptById(id) {
+  return ((FG() && FG().receipts) || []).filter(function (r) { return r.id === id; })[0] || null;
+}
+function receiptByNumber(num) {
+  var n = String(num || '').toUpperCase();
+  return ((FG() && FG().receipts) || []).filter(function (r) { return String(r.number || '').toUpperCase() === n; })[0] || null;
+}
+function getReceiptsLocal() {
+  return (FG().receipts || []).slice().sort(function (a, b) {
+    return new Date(b.updatedAt) - new Date(a.updatedAt);
+  });
+}
+function receiptsByTab(tab) {
+  var key = String(tab || '').replace(/ /g, '_');
+  var all = getReceiptsLocal();
+  if (key === 'EXPECTED') return all.filter(function (r) { return r.status === RECEIPT_STATUS.EXPECTED; });
+  if (key === 'RECEIVING') return all.filter(function (r) { return r.status === RECEIPT_STATUS.RECEIVING; });
+  if (key === 'RECEIVED') return all.filter(function (r) { return r.status === RECEIPT_STATUS.RECEIVED; });
+  if (key === 'EXCEPTIONS') return all.filter(function (r) {
+    return r.status === RECEIPT_STATUS.EXCEPTION || (r.exceptions || []).length > 0;
+  });
+  return all;
+}
+/* Run 7: receipts created today (local calendar date), for the dashboard. */
+function receiptsToday() {
+  var today = new Date().toDateString();
+  return getReceiptsLocal().filter(function (r) {
+    return r.createdAt && new Date(r.createdAt).toDateString() === today;
+  });
+}
+function loadoutTabs() { return ['READY', 'IN PROGRESS', 'LOADED', 'COMPLETED']; }
+function receiptTabs() { return ['EXPECTED', 'RECEIVING', 'RECEIVED', 'EXCEPTIONS']; }
+
+/* ---------- loadout readiness (derived, never stored) ----------
+   A work order is ready for loadout when every material line has a
+   CONSUMED inventory assignment (the required cut/pick is complete).
+   Lines without any assignment, or with assignments that were never
+   consumed, block readiness with an explicit reason. */
+function loadoutLineReadiness(wo, line) {
+  var assigns = allAssignmentsForLine(wo.id, line.id);
+  var consumed = assigns.filter(function (a) { return a.status === 'CONSUMED'; });
+  if (!consumed.length) {
+    return { ready: false, reason: assigns.length ? 'CUT NOT COMPLETE' : 'NOT ASSIGNED' };
+  }
+  var a = consumed[0];
+  var roll = a.rollId ? rollById(a.rollId) : null;
+  return { ready: true, assignment: a, roll: roll,
+    preparedIn: (a.actualCutIn != null ? a.actualCutIn : a.requiredIn) };
+}
+function loadoutReadiness(wo) {
+  var parts = (wo.lines || []).map(function (l) {
+    return { line: l, r: loadoutLineReadiness(wo, l) };
+  });
+  var open = openLoadoutForWO(wo.id);
+  var ready = parts.length > 0 && parts.every(function (p) { return p.r.ready; }) && !open;
+  return { ready: ready, openLoadout: open || null, parts: parts };
+}
+/* Work orders currently eligible to START a loadout (no open loadout). */
+function readyLoadoutWOs() {
+  return (FG().workOrders || []).map(function (w) {
+    return { wo: w, readiness: loadoutReadiness(w) };
+  }).filter(function (r) { return r.readiness.ready; });
+}
+
+/* ---------- audit ---------- */
+function logReceiptEvent(action, o) {
+  o = o || {};
+  (FG().receiptEvents = FG().receiptEvents || []).push({
+    id: rid('RE'), at: new Date().toISOString(), action: action,
+    user: o.user || (DB.data && DB.data.currentEmployee) || '',
+    warehouse: o.warehouse || (DB.data && DB.data.currentWarehouse) || '',
+    receiptId: o.receiptId || null, receiptNumber: o.receiptNumber || null,
+    rollId: o.rollId || null, detail: o.detail || ''
+  });
+  DB.save();
+}
+var RECEIPT_EVENT_LABELS = {
+  RECEIPT_CREATED: 'RECEIPT CREATED', ROLL_RECEIVED: 'ROLL RECEIVED',
+  RECEIPT_LINE_ADDED: 'RECEIPT LINE ADDED', LOCATION_ASSIGNED: 'LOCATION ASSIGNED',
+  RECEIPT_EXCEPTION: 'RECEIPT EXCEPTION', RECEIPT_COMPLETED: 'RECEIPT COMPLETED',
+  DOCUMENT_CAPTURED: 'DOCUMENT CAPTURED'
+};
+/* Loadout events ride the shared orderEvents feed (it already links
+   workOrderId + salesOrderId) so WO detail and SO activity both see the
+   loadout trace without a second store. */
+function logLoadoutEvent(action, o) {
+  o = o || {};
+  logOrderEvent(action, {
+    workOrderId: o.workOrderId || null, salesOrderId: o.salesOrderId || null,
+    detail: o.detail || '',
+    user: o.user, warehouse: o.warehouse
+  });
+  var evs = FG().orderEvents;
+  var last = evs[evs.length - 1];
+  if (last) { last.loadoutId = o.loadoutId || null; last.loadoutNumber = o.loadoutNumber || null; }
+  DB.save();
+}
+var LOADOUT_EVENT_LABELS = {
+  LOADOUT_STARTED: 'LOADOUT STARTED', LOADOUT_LOADING_BEGUN: 'LOADING BEGUN',
+  MATERIAL_VERIFIED: 'MATERIAL VERIFIED', MATERIAL_LOADED: 'MATERIAL LOADED',
+  LOADOUT_EXCEPTION: 'LOADOUT EXCEPTION', LOADOUT_COMPLETED: 'LOADOUT COMPLETED'
+};
+function loadoutEventsForWO(woId) {
+  return (FG().orderEvents || []).filter(function (e) {
+    return e.workOrderId === woId && (/^LOADOUT/.test(e.action) || /^MATERIAL_/.test(e.action));
+  }).sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
+}
+
+/* ---------- receipts: local mutations ---------- */
+function createReceiptLocal(h) {
+  h = h || {};
+  var pol = orderPolicyRequire(orderPolicy().canReceiveMaterial, 'NOT AUTHORIZED TO RECEIVE MATERIAL');
+  if (pol) return pol;
+  var now = new Date().toISOString();
+  var expected = !!h.expected;
+  var r = {
+    id: rid('RCV'), number: nextReceiptNumber(),
+    warehouseId: DB.data.currentWarehouse,
+    supplier: String(h.supplier || '').trim() || null,
+    referenceNumber: String(h.referenceNumber || '').trim() || null,
+    expected: expected,
+    status: expected ? RECEIPT_STATUS.EXPECTED : RECEIPT_STATUS.RECEIVING,
+    employeeId: DB.data.currentEmployee, createdBy: DB.data.currentEmployee,
+    notes: String(h.notes || '').trim() || null,
+    itemCount: 0, exceptionCount: 0,
+    lines: [], exceptions: [],
+    receivedAt: null, completedAt: null, completedBy: null,
+    createdAt: now, updatedAt: now
+  };
+  FG().receipts.push(r);
+  DB.save();
+  logReceiptEvent('RECEIPT_CREATED', { receiptId: r.id, receiptNumber: r.number,
+    detail: (r.supplier || 'Manual receipt') + (r.referenceNumber ? ' · ref ' + r.referenceNumber : '') + '.' });
+  return { ok: true, receipt: r };
+}
+/* Manual (non-carpet / non-scanned) receipt line. Carpet rolls should use
+   receiveRollLocal so the roll record, balance, and location are created. */
+function addReceiptLineLocal(receiptId, it) {
+  it = it || {};
+  var pol = orderPolicyRequire(orderPolicy().canReceiveMaterial, 'NOT AUTHORIZED TO RECEIVE MATERIAL');
+  if (pol) return pol;
+  var r = receiptById(receiptId);
+  if (!r) return { ok: false, err: 'RECEIPT NOT FOUND' };
+  if (r.status === RECEIPT_STATUS.RECEIVED) return { ok: false, err: 'RECEIPT ALREADY COMPLETED' };
+  var qty = Number(it.receivedQty);
+  if (!(qty > 0)) return { ok: false, err: 'RECEIVED QUANTITY REQUIRED' };
+  if (!it.style) return { ok: false, err: 'PRODUCT / STYLE REQUIRED' };
+  if (it.clientRequestId) {
+    var dup = (r.lines || []).filter(function (l) { return l.clientRequestId === it.clientRequestId; })[0];
+    if (dup) return { ok: true, receipt: r, line: dup, duplicate: true };
+  }
+  var line = {
+    id: rid('RL'), seq: (r.lines || []).length + 1,
+    materialType: it.materialType || 'OTHER', style: String(it.style).trim(),
+    color: String(it.color || '').trim() || null, uom: it.uom || 'EA',
+    widthIn: it.widthIn != null ? Number(it.widthIn) : null,
+    expectedQty: it.expectedQty != null ? Number(it.expectedQty) : null,
+    receivedQty: qty, receivedQtyIn: it.receivedQtyIn != null ? Number(it.receivedQtyIn) : null,
+    rollId: null, barcode: null, location: String(it.location || '').trim() || null,
+    status: RECEIPT_LINE_STATUS.RECEIVED,
+    receivedBy: DB.data.currentEmployee, receivedAt: new Date().toISOString(),
+    clientRequestId: it.clientRequestId || null
+  };
+  r.lines.push(line);
+  if (r.status === RECEIPT_STATUS.EXPECTED) r.status = RECEIPT_STATUS.RECEIVING;
+  r.itemCount = r.lines.length;
+  r.updatedAt = new Date().toISOString();
+  DB.save();
+  logReceiptEvent('RECEIPT_LINE_ADDED', { receiptId: r.id, receiptNumber: r.number,
+    detail: line.style + (line.color ? ' / ' + line.color : '') + ' × ' + qty + ' ' + line.uom + '.' });
+  return { ok: true, receipt: r, line: line };
+}
+/* Atomic receive-new-roll: validates everything first, then commits the
+   receipt line + roll record + initial balance + location + history event
+   together. A retried tap (same clientRequestId) returns the existing line.
+   An already-known barcode is NOT duplicated — the caller gets
+   ROLL_ALREADY_EXISTS with the roll's current state; a supervisor may
+   re-call with supervisorOverride to log a DUPLICATE ROLL exception line
+   against the existing roll without touching its balance. */
+function receiveRollLocal(receiptId, input) {
+  input = input || {};
+  var pol = orderPolicyRequire(orderPolicy().canReceiveMaterial, 'NOT AUTHORIZED TO RECEIVE MATERIAL');
+  if (pol) return pol;
+  var r = receiptById(receiptId);
+  if (!r) return { ok: false, err: 'RECEIPT NOT FOUND' };
+  if (r.status === RECEIPT_STATUS.RECEIVED) return { ok: false, err: 'RECEIPT ALREADY COMPLETED' };
+  var lengthIn = Math.round(Number(input.lengthIn));
+  if (!(lengthIn > 0)) return { ok: false, err: 'RECEIVED LENGTH REQUIRED' };
+  var barcode = String(input.barcode || '').trim();
+  if (!barcode) return { ok: false, err: 'ROLL BARCODE REQUIRED' };
+  var norm = normalizeBarcode(barcode);
+  if (!input.style) return { ok: false, err: 'STYLE REQUIRED' };
+  if (input.clientRequestId) {
+    var dup = (r.lines || []).filter(function (l) { return l.clientRequestId === input.clientRequestId; })[0];
+    if (dup) return { ok: true, receipt: r, line: dup, roll: rollById(dup.rollId), duplicate: true };
+  }
+  var existing = rollByBarcode(norm) || rollById(norm);
+  if (existing) {
+    if (!(input.supervisorOverride && orderPolicy().canReviewExceptions)) {
+      return { ok: false, err: 'ROLL ALREADY EXISTS', roll: existing, needsSupervisor: true,
+        detail: 'Location ' + (existing.expectedLocation || '—') + ' · balance ' + fmtLen(systemBalance(existing.id)) };
+    }
+    /* Supervisor-acknowledged duplicate: log the receipt line + DUPLICATE
+       ROLL exception against the existing roll. Balance untouched. */
+    var now0 = new Date().toISOString();
+    var dline = {
+      id: rid('RL'), seq: (r.lines || []).length + 1,
+      materialType: 'CARPET', style: String(input.style).trim(),
+      color: String(input.color || '').trim() || null, uom: 'LF',
+      widthIn: input.widthIn != null ? Number(input.widthIn) : (existing.widthIn || null),
+      expectedQty: null, receivedQty: null, receivedQtyIn: lengthIn,
+      rollId: existing.id, barcode: existing.barcode || norm,
+      location: existing.expectedLocation || null,
+      status: RECEIPT_LINE_STATUS.EXCEPTION,
+      receivedBy: DB.data.currentEmployee, receivedAt: now0,
+      clientRequestId: input.clientRequestId || null,
+      exception: 'DUPLICATE ROLL'
+    };
+    r.lines.push(dline);
+    r.exceptions.push({ id: rid('RX'), type: 'DUPLICATE ROLL', lineId: dline.id,
+      notes: 'Barcode ' + norm + ' already exists as roll ' + existing.id + ' — acknowledged, no new roll created.',
+      by: DB.data.currentEmployee, at: now0 });
+    if (r.status === RECEIPT_STATUS.EXPECTED) r.status = RECEIPT_STATUS.RECEIVING;
+    r.itemCount = r.lines.length; r.exceptionCount = r.exceptions.length;
+    r.updatedAt = now0;
+    DB.save();
+    logReceiptEvent('RECEIPT_EXCEPTION', { receiptId: r.id, receiptNumber: r.number, rollId: existing.id,
+      detail: 'DUPLICATE ROLL ' + norm + ' acknowledged by ' + DB.data.currentEmployee + '.' });
+    return { ok: true, receipt: r, line: dline, roll: existing, duplicateRoll: true };
+  }
+  var now = new Date().toISOString();
+  var loc = String(input.location || '').trim() || null;
+  var roll = {
+    id: norm, barcode: norm,
+    manufacturer: String(input.manufacturer || '').trim() || null,
+    style: String(input.style).trim(), color: String(input.color || '').trim() || null,
+    materialType: 'Carpet', widthIn: input.widthIn != null ? Number(input.widthIn) : null,
+    beginningIn: lengthIn, expectedLocation: loc,
+    receivedAt: now, receivedBy: DB.data.currentEmployee, receiptId: r.id
+  };
+  var line = {
+    id: rid('RL'), seq: (r.lines || []).length + 1,
+    materialType: 'CARPET', style: roll.style, color: roll.color, uom: 'LF',
+    widthIn: roll.widthIn, expectedQty: null, receivedQty: null, receivedQtyIn: lengthIn,
+    rollId: roll.id, barcode: roll.barcode, location: loc,
+    status: RECEIPT_LINE_STATUS.RECEIVED,
+    receivedBy: DB.data.currentEmployee, receivedAt: now,
+    clientRequestId: input.clientRequestId || null
+  };
+  FG().rolls.push(roll);
+  r.lines.push(line);
+  if (r.status === RECEIPT_STATUS.EXPECTED) r.status = RECEIPT_STATUS.RECEIVING;
+  r.itemCount = r.lines.length;
+  r.updatedAt = now;
+  DB.save();
+  /* ROLL_RECEIVED history event — a receiving event, never a cycle count.
+     Beginning and expected balances match until the first cut. */
+  logReceiptEvent('ROLL_RECEIVED', { receiptId: r.id, receiptNumber: r.number, rollId: roll.id,
+    detail: roll.style + (roll.color ? ' / ' + roll.color : '') + ' · received ' + fmtLen(lengthIn) +
+      (loc ? ' · location ' + loc : '') + '.' });
+  if (loc) logReceiptEvent('LOCATION_ASSIGNED', { receiptId: r.id, receiptNumber: r.number, rollId: roll.id,
+    detail: 'Roll ' + roll.id + ' placed at ' + loc + '.' });
+  return { ok: true, receipt: r, line: line, roll: roll };
+}
+/* SCAN ITEM -> SCAN LOCATION -> CONFIRM for newly received material. */
+function assignReceivedLocationLocal(rollId, location) {
+  var pol = orderPolicyRequire(orderPolicy().canReceiveMaterial, 'NOT AUTHORIZED TO RECEIVE MATERIAL');
+  if (pol) return pol;
+  var roll = rollById(rollId);
+  if (!roll) return { ok: false, err: 'ROLL NOT FOUND' };
+  var loc = String(location || '').trim().toUpperCase();
+  if (!loc) return { ok: false, err: 'LOCATION REQUIRED' };
+  roll.expectedLocation = loc;
+  DB.save();
+  logReceiptEvent('LOCATION_ASSIGNED', { rollId: roll.id,
+    detail: 'Roll ' + roll.id + ' placed at ' + loc + '.' });
+  return { ok: true, roll: roll };
+}
+function createReceiptExceptionLocal(receiptId, type, notes, lineId) {
+  var pol = orderPolicyRequire(orderPolicy().canReceiveMaterial, 'NOT AUTHORIZED TO RECEIVE MATERIAL');
+  if (pol) return pol;
+  var r = receiptById(receiptId);
+  if (!r) return { ok: false, err: 'RECEIPT NOT FOUND' };
+  if (r.status === RECEIPT_STATUS.RECEIVED) return { ok: false, err: 'RECEIPT ALREADY COMPLETED' };
+  type = String(type || '').trim().toUpperCase();
+  if (RECEIPT_EXCEPTION_TYPES.indexOf(type) < 0) return { ok: false, err: 'UNKNOWN EXCEPTION TYPE' };
+  var now = new Date().toISOString();
+  var ex = { id: rid('RX'), type: type, lineId: lineId || null,
+    notes: String(notes || '').trim() || null, by: DB.data.currentEmployee, at: now };
+  r.exceptions.push(ex);
+  if (r.status !== RECEIPT_STATUS.EXCEPTION) r.status = RECEIPT_STATUS.EXCEPTION;
+  r.exceptionCount = r.exceptions.length;
+  r.updatedAt = now;
+  DB.save();
+  logReceiptEvent('RECEIPT_EXCEPTION', { receiptId: r.id, receiptNumber: r.number,
+    detail: type + (ex.notes ? ' — ' + ex.notes : '') });
+  return { ok: true, receipt: r, exception: ex };
+}
+function completeReceiptLocal(receiptId) {
+  var pol = orderPolicyRequire(orderPolicy().canCompleteReceipt, 'NOT AUTHORIZED TO COMPLETE RECEIPTS');
+  if (pol) return pol;
+  var r = receiptById(receiptId);
+  if (!r) return { ok: false, err: 'RECEIPT NOT FOUND' };
+  if (r.status === RECEIPT_STATUS.RECEIVED)
+    return { ok: true, receipt: r, duplicate: true };
+  if (!(r.lines || []).length && !(r.exceptions || []).length)
+    return { ok: false, err: 'RECEIPT IS EMPTY' };
+  var now = new Date().toISOString();
+  r.status = RECEIPT_STATUS.RECEIVED;
+  r.receivedAt = r.receivedAt || now;
+  r.completedAt = now; r.completedBy = DB.data.currentEmployee;
+  r.itemCount = (r.lines || []).length; r.exceptionCount = (r.exceptions || []).length;
+  r.updatedAt = now;
+  DB.save();
+  logReceiptEvent('RECEIPT_COMPLETED', { receiptId: r.id, receiptNumber: r.number,
+    detail: r.itemCount + ' item(s), ' + r.exceptionCount + ' exception(s).' });
+  return { ok: true, receipt: r };
+}
+function receiptEventsFor(receiptId) {
+  return ((FG() && FG().receiptEvents) || []).filter(function (e) { return e.receiptId === receiptId; })
+    .sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
+}
+function receiptDocuments(receiptId) {
+  return ((FG() && FG().documents) || []).filter(function (d) { return d.receiptId === receiptId; });
+}
+
+/* ---------- loadouts: local mutations ---------- */
+function startLoadoutLocal(woId, opts) {
+  opts = opts || {};
+  var pol = orderPolicyRequire(orderPolicy().canStartLoadout, 'NOT AUTHORIZED TO START LOADOUTS');
+  if (pol) return pol;
+  var w = woById(woId);
+  if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  var open = openLoadoutForWO(woId);
+  if (open) return { ok: true, loadout: open, duplicate: true };
+  var readiness = loadoutReadiness(w);
+  if (!readiness.ready) {
+    var why = readiness.parts.filter(function (p) { return !p.r.ready; })
+      .map(function (p) { return 'Line ' + (p.line.id || '?') + ': ' + p.r.reason; }).join('; ');
+    return { ok: false, err: 'WORK ORDER NOT READY FOR LOADOUT', detail: why };
+  }
+  var now = new Date().toISOString();
+  var lines = readiness.parts.map(function (p, i) {
+    var a = p.r.assignment, roll = p.r.roll;
+    return {
+      id: rid('LL'), seq: i + 1, woLineId: p.line.id, assignmentId: a.id,
+      rollId: roll ? roll.id : null, barcode: roll ? (roll.barcode || roll.id) : null,
+      style: p.line.style, color: p.line.color, materialType: p.line.materialType,
+      widthIn: p.line.widthIn, uom: p.line.uom || 'LF',
+      requiredIn: p.line.requiredIn != null ? p.line.requiredIn : null,
+      requiredCount: p.line.requiredCount != null ? p.line.requiredCount : null,
+      preparedIn: p.r.preparedIn, verifiedIn: null,
+      status: LOADOUT_LINE_STATUS.WAITING,
+      verifiedBy: null, verifiedAt: null, loadedBy: null, loadedAt: null, loadedQtyIn: null
+    };
+  });
+  var lo = {
+    id: rid('LOAD'), number: nextLoadoutNumber(),
+    warehouseId: DB.data.currentWarehouse, workOrderId: w.id,
+    salesOrderId: w.salesOrderId || null,
+    property: w.property, account: w.account,
+    scheduledDate: w.scheduledDate || null, priority: w.priority || 'NORMAL',
+    assignedEmployeeId: opts.employeeId || w.assigneeId || null,
+    startedBy: DB.data.currentEmployee, startedAt: now,
+    loadedAt: null, completedAt: null, completedBy: null,
+    status: LOADOUT_STATUS.READY,
+    lines: lines, exceptions: [],
+    createdAt: now, updatedAt: now
+  };
+  FG().loadouts.push(lo);
+  DB.save();
+  logLoadoutEvent('LOADOUT_STARTED', { loadoutId: lo.id, loadoutNumber: lo.number,
+    workOrderId: w.id, salesOrderId: lo.salesOrderId,
+    detail: lines.length + ' material line(s) ready to load.' });
+  return { ok: true, loadout: lo };
+}
+function beginLoadingLocal(loadoutId) {
+  var pol = orderPolicyRequire(orderPolicy().canStartLoadout, 'NOT AUTHORIZED TO START LOADOUTS');
+  if (pol) return pol;
+  var lo = loadoutById(loadoutId);
+  if (!lo) return { ok: false, err: 'LOADOUT NOT FOUND' };
+  if (lo.status === LOADOUT_STATUS.IN_PROGRESS) return { ok: true, loadout: lo, duplicate: true };
+  if (lo.status !== LOADOUT_STATUS.READY) return { ok: false, err: 'LOADOUT CANNOT BEGIN LOADING' };
+  lo.status = LOADOUT_STATUS.IN_PROGRESS;
+  lo.updatedAt = new Date().toISOString();
+  DB.save();
+  logLoadoutEvent('LOADOUT_LOADING_BEGUN', { loadoutId: lo.id, loadoutNumber: lo.number,
+    workOrderId: lo.workOrderId, salesOrderId: lo.salesOrderId, detail: 'Employee is actively loading.' });
+  return { ok: true, loadout: lo };
+}
+function loadoutLineById(lo, lineId) {
+  return ((lo && lo.lines) || []).filter(function (l) { return l.id === lineId; })[0] || null;
+}
+/* SCAN ROLL TO VERIFY. Correct roll -> VERIFIED. Wrong roll -> the line is
+   flagged EXCEPTION (never silently accepted); a later correct scan clears
+   the flag back to VERIFIED while the exception stays on record. */
+function verifyLoadoutLineLocal(loadoutId, lineId, barcode) {
+  var pol = orderPolicyRequire(orderPolicy().canVerifyLoadout, 'NOT AUTHORIZED TO VERIFY MATERIAL');
+  if (pol) return pol;
+  var lo = loadoutById(loadoutId);
+  if (!lo) return { ok: false, err: 'LOADOUT NOT FOUND' };
+  if (lo.status === LOADOUT_STATUS.COMPLETED) return { ok: false, err: 'LOADOUT ALREADY COMPLETED' };
+  var line = loadoutLineById(lo, lineId);
+  if (!line) return { ok: false, err: 'LINE NOT FOUND' };
+  if (line.status === LOADOUT_LINE_STATUS.LOADED) return { ok: true, loadout: lo, line: line, duplicate: true };
+  var norm = normalizeBarcode(String(barcode || ''));
+  if (!norm) return { ok: false, err: 'BARCODE REQUIRED' };
+  var now = new Date().toISOString();
+  var expected = line.barcode ? normalizeBarcode(line.barcode) : null;
+  var roll = rollByBarcode(norm) || rollById(norm);
+  if (expected && norm === expected && roll && (!line.rollId || roll.id === line.rollId)) {
+    line.status = LOADOUT_LINE_STATUS.VERIFIED;
+    line.verifiedBy = DB.data.currentEmployee; line.verifiedAt = now;
+    line.verifiedIn = line.preparedIn;
+    lo.updatedAt = now;
+    DB.save();
+    logLoadoutEvent('MATERIAL_VERIFIED', { loadoutId: lo.id, loadoutNumber: lo.number,
+      workOrderId: lo.workOrderId, salesOrderId: lo.salesOrderId,
+      detail: 'Line ' + line.seq + ': roll ' + norm + ' verified (' + fmtLen(line.preparedIn) + ').' });
+    return { ok: true, loadout: lo, line: line };
+  }
+  var ex = { id: rid('LX'), type: 'WRONG MATERIAL', lineId: line.id,
+    notes: 'Scanned ' + norm + ', expected ' + (line.barcode || '—') + '.',
+    by: DB.data.currentEmployee, at: now };
+  lo.exceptions.push(ex);
+  line.status = LOADOUT_LINE_STATUS.EXCEPTION;
+  lo.updatedAt = now;
+  DB.save();
+  logLoadoutEvent('LOADOUT_EXCEPTION', { loadoutId: lo.id, loadoutNumber: lo.number,
+    workOrderId: lo.workOrderId, salesOrderId: lo.salesOrderId,
+    detail: 'Line ' + line.seq + ': WRONG MATERIAL — scanned ' + norm + ', expected ' + (line.barcode || '—') + '.' });
+  return { ok: false, err: 'WRONG MATERIAL', loadout: lo, line: line, exception: ex };
+}
+function markLoadoutLineLoadedLocal(loadoutId, lineId) {
+  var pol = orderPolicyRequire(orderPolicy().canLoadMaterial, 'NOT AUTHORIZED TO LOAD MATERIAL');
+  if (pol) return pol;
+  var lo = loadoutById(loadoutId);
+  if (!lo) return { ok: false, err: 'LOADOUT NOT FOUND' };
+  if (lo.status === LOADOUT_STATUS.COMPLETED) return { ok: false, err: 'LOADOUT ALREADY COMPLETED' };
+  var line = loadoutLineById(lo, lineId);
+  if (!line) return { ok: false, err: 'LINE NOT FOUND' };
+  if (line.status === LOADOUT_LINE_STATUS.LOADED)
+    return { ok: true, loadout: lo, line: line, duplicate: true };
+  if (line.status !== LOADOUT_LINE_STATUS.VERIFIED)
+    return { ok: false, err: 'VERIFY MATERIAL BEFORE MARKING LOADED' };
+  var now = new Date().toISOString();
+  line.status = LOADOUT_LINE_STATUS.LOADED;
+  line.loadedBy = DB.data.currentEmployee; line.loadedAt = now;
+  line.loadedQtyIn = line.verifiedIn != null ? line.verifiedIn : line.preparedIn;
+  /* The roll balance is NOT touched here — it already changed at cut time. */
+  if ((lo.lines || []).every(function (l) { return l.status === LOADOUT_LINE_STATUS.LOADED; })) {
+    lo.status = LOADOUT_STATUS.LOADED;
+    lo.loadedAt = now;
+  }
+  lo.updatedAt = now;
+  DB.save();
+  logLoadoutEvent('MATERIAL_LOADED', { loadoutId: lo.id, loadoutNumber: lo.number,
+    workOrderId: lo.workOrderId, salesOrderId: lo.salesOrderId,
+    detail: 'Line ' + line.seq + ': ' + fmtLen(line.loadedQtyIn) + ' loaded by ' + DB.data.currentEmployee + '.' });
+  return { ok: true, loadout: lo, line: line };
+}
+function createLoadoutExceptionLocal(loadoutId, lineId, type, notes) {
+  var pol = orderPolicyRequire(orderPolicy().canLoadMaterial, 'NOT AUTHORIZED TO LOAD MATERIAL');
+  if (pol) return pol;
+  var lo = loadoutById(loadoutId);
+  if (!lo) return { ok: false, err: 'LOADOUT NOT FOUND' };
+  if (lo.status === LOADOUT_STATUS.COMPLETED) return { ok: false, err: 'LOADOUT ALREADY COMPLETED' };
+  type = String(type || '').trim().toUpperCase();
+  if (LOADOUT_EXCEPTION_TYPES.indexOf(type) < 0) return { ok: false, err: 'UNKNOWN EXCEPTION TYPE' };
+  var now = new Date().toISOString();
+  var ex = { id: rid('LX'), type: type, lineId: lineId || null,
+    notes: String(notes || '').trim() || null, by: DB.data.currentEmployee, at: now };
+  lo.exceptions.push(ex);
+  var line = lineId ? loadoutLineById(lo, lineId) : null;
+  if (line && line.status !== LOADOUT_LINE_STATUS.LOADED) line.status = LOADOUT_LINE_STATUS.EXCEPTION;
+  lo.updatedAt = now;
+  DB.save();
+  logLoadoutEvent('LOADOUT_EXCEPTION', { loadoutId: lo.id, loadoutNumber: lo.number,
+    workOrderId: lo.workOrderId, salesOrderId: lo.salesOrderId,
+    detail: (line ? 'Line ' + line.seq + ': ' : '') + type + (ex.notes ? ' — ' + ex.notes : '') });
+  return { ok: true, loadout: lo, exception: ex };
+}
+/* Completion guard: every required line must be LOADED. Rejects incomplete
+   loadouts instead of forcing them through. */
+function completeLoadoutLocal(loadoutId) {
+  var pol = orderPolicyRequire(orderPolicy().canCompleteLoadout, 'NOT AUTHORIZED TO COMPLETE LOADOUTS');
+  if (pol) return pol;
+  var lo = loadoutById(loadoutId);
+  if (!lo) return { ok: false, err: 'LOADOUT NOT FOUND' };
+  if (lo.status === LOADOUT_STATUS.COMPLETED) return { ok: true, loadout: lo, duplicate: true };
+  var pending = (lo.lines || []).filter(function (l) { return l.status !== LOADOUT_LINE_STATUS.LOADED; });
+  if (pending.length) {
+    return { ok: false, err: 'LOADOUT INCOMPLETE',
+      detail: pending.map(function (l) { return 'Line ' + l.seq + ' is ' + l.status; }).join('; ') };
+  }
+  var now = new Date().toISOString();
+  lo.status = LOADOUT_STATUS.COMPLETED;
+  lo.completedAt = now; lo.completedBy = DB.data.currentEmployee;
+  lo.updatedAt = now;
+  DB.save();
+  logLoadoutEvent('LOADOUT_COMPLETED', { loadoutId: lo.id, loadoutNumber: lo.number,
+    workOrderId: lo.workOrderId, salesOrderId: lo.salesOrderId,
+    detail: (lo.lines || []).length + ' line(s) loaded. Job leaves the warehouse.' });
+  return { ok: true, loadout: lo };
+}
+function loadoutStatusChip(st) {
+  var map = { READY: 'chip chip-blue', IN_PROGRESS: 'chip chip-amber', LOADED: 'chip chip-green',
+    COMPLETED: 'chip chip-gray', ON_HOLD: 'chip chip-red' };
+  return '<span class="' + (map[st] || 'chip') + '">' + esc(String(st || '').replace(/_/g, ' ')) + '</span>';
+}
+function receiptStatusChip(st) {
+  var map = { EXPECTED: 'chip', RECEIVING: 'chip chip-blue', RECEIVED: 'chip chip-green', EXCEPTION: 'chip chip-red' };
+  return '<span class="' + (map[st] || 'chip') + '">' + esc(String(st || '').replace(/_/g, ' ')) + '</span>';
+}
+
+
 
 /* ---- Property / account directory ----
    Reuses shared Property / Account entities — no duplicate records per
@@ -3864,6 +4597,702 @@ function reasonModal(title, okLabel, onOk, allowForce) {
     onOk(reason, force);
   };
 }
+
+/* ======================================================================
+   RUN 7 screens: Loadout + Receipts.
+   ====================================================================== */
+
+/* ---------- shared Run 7 presentation bits ---------- */
+function loadoutMaterialSummary(lo) {
+  return (lo.lines || []).map(function (l) {
+    var q = l.uom === 'LF' && l.preparedIn != null ? fmtLen(l.preparedIn)
+      : (l.requiredCount != null ? l.requiredCount + ' × ' : '');
+    return (l.style || '') + (l.color ? ' / ' + l.color : '') + (q ? ' — ' + q : '');
+  }).join('; ');
+}
+function loadoutCardHtml(lo) {
+  var w = lo.workOrderId ? woById(lo.workOrderId) : null;
+  var nLoaded = (lo.lines || []).filter(function (l) { return l.status === LOADOUT_LINE_STATUS.LOADED; }).length;
+  return '<button class="rowbtn" data-loadout="' + esc(lo.id) + '">' +
+    '<div class="rhead"><b class="mono">' + esc(lo.number) + '</b> ' + loadoutStatusChip(lo.status) +
+    (w ? ' <span class="sub mono">' + esc(w.number) + '</span>' : '') + '</div>' +
+    '<div class="sub">' + esc(lo.property || '') + (lo.account ? ' · ' + esc(lo.account) : '') + '</div>' +
+    '<div class="sub">' + esc(loadoutMaterialSummary(lo)) + '</div>' +
+    '<div class="sub">' + nLoaded + '/' + (lo.lines || []).length + ' lines loaded' +
+    (lo.assignedEmployeeId ? ' · ' + esc(lo.assignedEmployeeId) : '') + '</div></button>';
+}
+function readyWOStubHtml(r) {
+  var w = r.wo;
+  var mat = (w.lines || []).map(function (l) {
+    var q = l.uom === 'LF' ? fmtLen(l.requiredIn || 0) : (l.requiredCount + ' ×');
+    return (l.style || '') + (l.color ? ' / ' + l.color : '') + ' — ' + q;
+  }).join('; ');
+  var rolls = r.readiness.parts.map(function (p) {
+    return p.r.roll ? p.r.roll.id : null;
+  }).filter(Boolean).join(', ');
+  return '<div class="card"><div class="rhead"><b class="mono">' + esc(w.number) + '</b> ' +
+    '<span class="stchip st-green">READY TO LOAD</span></div>' +
+    '<div class="sub">' + esc(w.property || '') + (w.account ? ' · ' + esc(w.account) : '') + '</div>' +
+    '<div class="sub">' + esc(mat) + '</div>' +
+    (rolls ? '<div class="sub">Roll: <span class="mono">' + esc(rolls) + '</span></div>' : '') +
+    '<button class="btn btn-primary" data-startloadout="' + esc(w.id) + '">START LOADOUT</button></div>';
+}
+function receiptCardHtml(r) {
+  return '<button class="rowbtn" data-receipt="' + esc(r.id) + '">' +
+    '<div class="rhead"><b class="mono">' + esc(r.number) + '</b> ' + receiptStatusChip(r.status) + '</div>' +
+    '<div class="sub">' + esc(r.supplier || 'Manual receipt') +
+    (r.referenceNumber ? ' · ref <span class="mono">' + esc(r.referenceNumber) + '</span>' : '') + '</div>' +
+    '<div class="sub">' + (r.lines || []).length + ' line(s)' +
+    ((r.exceptions || []).length ? ' · <b>' + r.exceptions.length + ' exception(s)</b>' : '') + '</div></button>';
+}
+function loadoutLineStatusChip(st) {
+  var map = { WAITING: 'chip', VERIFIED: 'chip chip-blue', LOADED: 'chip chip-green', EXCEPTION: 'chip chip-red' };
+  return '<span class="' + (map[st] || 'chip') + '">' + esc(String(st || '').replace(/_/g, ' ')) + '</span>';
+}
+
+/* ---------- /loadout ---------- */
+Screens['loadout'] = function (param) {
+  var parts = String(param || '').split('/');
+  var tab = (parts[0] || 'READY').toUpperCase().replace(/_/g, ' ');
+  if (loadoutTabs().indexOf(tab) < 0) tab = 'READY';
+  var tabs = loadoutTabs().map(function (t) {
+    var n = loadoutsByTab(t).length;
+    return '<button class="fchip' + (t === tab ? ' on' : '') + '" data-tab="' + t + '">' + t +
+      ' <b class="badge">' + n + '</b></button>';
+  }).join('');
+  function cardHtml() {
+    var q = (LO7.q || '').toUpperCase();
+    function matchLo(lo) {
+      if (!q) return true;
+      var w = lo.workOrderId ? woById(lo.workOrderId) : null;
+      var hay = [lo.number, lo.id, lo.property, lo.account,
+        w ? w.number : '', lo.status,
+        (lo.lines || []).map(function (l) { return (l.barcode || '') + ' ' + (l.style || ''); }).join(' ')
+      ].join(' ').toUpperCase();
+      return hay.indexOf(q) >= 0;
+    }
+    function matchStub(r) {
+      if (!q) return true;
+      var hay = [r.wo.number, r.wo.property, r.wo.account].join(' ').toUpperCase();
+      return hay.indexOf(q) >= 0;
+    }
+    if (tab === 'READY') {
+      var stubs = readyLoadoutWOs().filter(matchStub);
+      var los = loadoutsByTab('READY').filter(matchLo);
+      var h = stubs.map(readyWOStubHtml).join('') + los.map(loadoutCardHtml).join('');
+      return h || '<p class="hint">Nothing ready to load. Work orders appear here once material is assigned and cut.</p>';
+    }
+    var list = loadoutsByTab(tab).filter(matchLo);
+    return list.length ? list.map(loadoutCardHtml).join('') : '<p class="hint">No loadouts here.</p>';
+  }
+  var html =
+    '<div class="screen">' +
+    pageHead('🚚 Loadout', 'Material leaving the warehouse') +
+    '<div class="chiprow">' + tabs + '</div>' +
+    '<div class="card"><div class="field"><label class="label" for="lo7-q">SEARCH</label>' +
+    '<input class="input" id="lo7-q" autocomplete="off" placeholder="Loadout #, WO #, property, roll…"></div></div>' +
+    '<div id="lo7-list">' + cardHtml() + '</div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    if (typeof LO7 === 'undefined' || !LO7) LO7 = {};
+    LO7.q = '';
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tab]'), function (b) {
+      b.onclick = function () { go('loadout', b.getAttribute('data-tab')); };
+    });
+    var qi = $('#lo7-q'), qt = null;
+    qi.addEventListener('input', function () {
+      clearTimeout(qt);
+      qt = setTimeout(function () { LO7.q = qi.value; $('#lo7-list').innerHTML = cardHtml(); wireCards(); }, 250);
+    });
+    function wireCards() {
+      Array.prototype.forEach.call(document.querySelectorAll('[data-loadout]'), function (b) {
+        b.onclick = function () { go('loadout/detail', b.getAttribute('data-loadout')); };
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-startloadout]'), function (b) {
+        b.onclick = function () {
+          run6Call(Repository.startLoadout(b.getAttribute('data-startloadout')), function (res) {
+            good(); toast('Loadout ' + res.loadout.number + (res.duplicate ? ' (already open).' : ' started.'));
+            go('loadout/detail', res.loadout.id);
+          }, function (err) { bad(); toast((err && err.message) || 'Could not start loadout.'); });
+        };
+      });
+    }
+    wireCards();
+  } };
+};
+var LO7 = { q: '' };
+
+/* ---------- /loadout/detail ---------- */
+var LOVERIFY = null; /* { loadoutId, lineId } — which line is being scan-verified */
+Screens['loadout/detail'] = function (param) {
+  var lo = loadoutById(param);
+  if (!lo) { setTimeout(function () { go('loadout'); }, 0); return { html: '' }; }
+  var w = lo.workOrderId ? woById(lo.workOrderId) : null;
+  var pol = orderPolicy();
+  function lineHtml(l) {
+    var roll = l.rollId ? rollById(l.rollId) : null;
+    var qty = l.preparedIn != null ? fmtLen(l.preparedIn) : (l.requiredCount != null ? l.requiredCount + ' ×' : '—');
+    var h = '<div class="card"><div class="rhead"><b>Line ' + l.seq + '</b> ' + loadoutLineStatusChip(l.status) + '</div>' +
+      '<div class="kv"><span class="k">Material</span><span><b>' + esc(l.style || '') +
+      (l.color ? ' / ' + esc(l.color) : '') + '</b></span></div>' +
+      '<div class="kv"><span class="k">Quantity</span><span class="num">' + esc(qty) + '</span></div>' +
+      (l.rollId ? '<div class="kv"><span class="k">Roll</span><span class="mono">' + esc(l.rollId) + '</span></div>' : '') +
+      (roll ? '<div class="kv"><span class="k">Location</span><span class="mono">' + esc(roll.expectedLocation || '—') + '</span></div>' : '') +
+      (l.verifiedBy ? '<div class="kv"><span class="k">Verified</span><span>' + esc(l.verifiedBy) + ' · ' + fmtDT(l.verifiedAt) + '</span></div>' : '') +
+      (l.loadedBy ? '<div class="kv"><span class="k">Loaded</span><span>' + esc(l.loadedBy) + ' · ' + fmtDT(l.loadedAt) + '</span></div>' : '');
+    if ((l.status === LOADOUT_LINE_STATUS.WAITING || l.status === LOADOUT_LINE_STATUS.EXCEPTION) &&
+        lo.status !== LOADOUT_STATUS.COMPLETED && pol.canVerifyLoadout) {
+      h += '<button class="btn btn-primary" data-verifyline="' + esc(l.id) + '">SCAN ROLL TO VERIFY</button>';
+    }
+    if (l.status === LOADOUT_LINE_STATUS.VERIFIED && pol.canLoadMaterial) {
+      h += '<button class="btn btn-primary btn-huge" data-markloaded="' + esc(l.id) + '">MARK LOADED</button>';
+    }
+    h += '</div>';
+    return h;
+  }
+  function verifyPanelHtml() {
+    if (!LOVERIFY || LOVERIFY.loadoutId !== lo.id) return '';
+    var l = loadoutLineById(lo, LOVERIFY.lineId);
+    if (!l) return '';
+    var chips = (FG().rolls || []).map(function (r) {
+      return '<button class="demochip" data-vcode="' + esc(r.barcode || r.id) + '">' + esc(r.barcode || r.id) + '</button>';
+    }).join('');
+    return '<div class="card" id="lo-verify"><div class="label">SCAN ROLL TO VERIFY — LINE ' + l.seq + '</div>' +
+      '<div class="hint">Expected roll: <span class="mono">' + esc(l.barcode || '—') + '</span></div>' +
+      '<div class="cambox" id="lo-rollcam"><div class="camnote">Starting camera…</div></div>' +
+      '<form id="lo-verifyform"><div class="field"><label class="label">OR TYPE / WEDGE THE BARCODE</label>' +
+      '<input class="input mono" id="lo-vcode" autocomplete="off" autocapitalize="characters"></div>' +
+      '<button class="btn btn-primary btn-huge" type="submit">VERIFY</button></form>' +
+      '<div class="demolabel">DEMO — TAP TO SIMULATE A SCAN</div><div class="demochips">' + chips + '</div>' +
+      '<div id="lo-vresult"></div>' +
+      '<button class="btn btn-ghost" id="lo-vcancel">CANCEL</button></div>';
+  }
+  var exHtml = (lo.exceptions || []).length ? '<h2>Exceptions</h2>' + (lo.exceptions || []).map(function (e) {
+    return '<div class="trow"><div><b>' + esc(e.type) + '</b>' +
+      (e.notes ? '<div class="sub">' + esc(e.notes) + '</div>' : '') + '</div>' +
+      '<div class="sub">' + esc(e.by || '') + '<br>' + fmtDT(e.at) + '</div></div>';
+  }).join('') : '';
+  var actHtml = (function () {
+    var evs = loadoutEventsForWO(lo.workOrderId);
+    if (!evs.length) return '<p class="hint">No loadout activity yet.</p>';
+    return evs.map(function (e) {
+      return '<div class="trow"><div><b>' + esc(LOADOUT_EVENT_LABELS[e.action] || e.action) + '</b>' +
+        (e.detail ? '<div class="sub">' + esc(e.detail) + '</div>' : '') + '</div>' +
+        '<div class="sub">' + esc(e.user || '') + '<br>' + fmtDT(e.at) + '</div></div>';
+    }).join('');
+  })();
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← LOADOUT</button>' +
+    pageHead('🚚 ' + esc(lo.number), 'Loadout detail') +
+    '<div class="card">' +
+    '<div class="kv"><span class="k">Status</span><span>' + loadoutStatusChip(lo.status) + '</span></div>' +
+    '<div class="kv"><span class="k">Work Order</span><span class="mono">' + esc(w ? w.number : '—') + '</span></div>' +
+    (lo.salesOrderId ? '<div class="kv"><span class="k">Sales Order</span><span class="mono">' +
+      esc((function () { var s = salesOrderById(lo.salesOrderId); return s ? s.number : lo.salesOrderId; })()) + '</span></div>' : '') +
+    '<div class="kv"><span class="k">Property</span><span>' + esc(lo.property || '—') + '</span></div>' +
+    (lo.account ? '<div class="kv"><span class="k">Account</span><span>' + esc(lo.account) + '</span></div>' : '') +
+    (lo.scheduledDate ? '<div class="kv"><span class="k">Scheduled</span><span>' + esc(fmtD(lo.scheduledDate)) + '</span></div>' : '') +
+    '<div class="kv"><span class="k">Priority</span><span>' + esc(lo.priority || 'NORMAL') + '</span></div>' +
+    '<div class="kv"><span class="k">Started</span><span>' + esc(lo.startedBy || '—') + ' · ' + fmtDT(lo.startedAt) + '</span></div>' +
+    (lo.completedAt ? '<div class="kv"><span class="k">Completed</span><span>' + esc(lo.completedBy || '') + ' · ' + fmtDT(lo.completedAt) + '</span></div>' : '') +
+    '</div>' +
+    (lo.status === LOADOUT_STATUS.READY && pol.canStartLoadout ?
+      '<button class="btn btn-primary btn-huge" id="lo-begin">BEGIN LOADING</button>' : '') +
+    '<h2>Material lines</h2>' +
+    (lo.lines || []).map(lineHtml).join('') +
+    verifyPanelHtml() +
+    (lo.status !== LOADOUT_STATUS.COMPLETED && pol.canLoadMaterial ?
+      '<button class="btn" id="lo-exception">⚠ FLAG LOADOUT EXCEPTION</button>' : '') +
+    (lo.status !== LOADOUT_STATUS.COMPLETED && pol.canCompleteLoadout ?
+      '<button class="btn btn-primary btn-huge" id="lo-complete">COMPLETE LOADOUT</button>' : '') +
+    exHtml +
+    '<h2>Activity</h2><div class="card">' + actHtml + '</div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { LOVERIFY = null; go('loadout'); };
+    if ($('#lo-begin')) $('#lo-begin').onclick = function () {
+      run6Call(Repository.beginLoading(lo.id), function () { good(); render(); },
+        function (err) { bad(); toast((err && err.message) || 'Could not begin loading.'); });
+    };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-verifyline]'), function (b) {
+      b.onclick = function () {
+        LOVERIFY = { loadoutId: lo.id, lineId: b.getAttribute('data-verifyline') };
+        render();
+        setTimeout(function () {
+          var p = $('#lo-verify');
+          if (p && p.scrollIntoView) p.scrollIntoView();
+        }, 50);
+      };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-markloaded]'), function (b) {
+      b.onclick = function () {
+        run6Call(Repository.markLoadoutLineLoaded(lo.id, b.getAttribute('data-markloaded')), function (res) {
+          good(); toast('Line ' + res.line.seq + ' marked loaded.');
+          render();
+        }, function (err) { bad(); toast((err && err.message) || 'Could not mark loaded.'); });
+      };
+    });
+    if ($('#lo-verifyform')) {
+      mountScannerBox('lo-rollcam', onVCode);
+      $('#lo-verifyform').onsubmit = function (e) { e.preventDefault(); onVCode($('#lo-vcode').value); };
+      Array.prototype.forEach.call(document.querySelectorAll('[data-vcode]'), function (c) {
+        c.onclick = function () { onVCode(c.getAttribute('data-vcode')); };
+      });
+      $('#lo-vcancel').onclick = function () { LOVERIFY = null; render(); };
+    }
+    function onVCode(code) {
+      run6Call(Repository.verifyLoadoutLine(lo.id, LOVERIFY.lineId, code), function (res) {
+        good(); toast('✓ MATERIAL VERIFIED — roll ' + code);
+        LOVERIFY = null; render();
+      }, function (err) {
+        bad();
+        var box = $('#lo-vresult');
+        if (err && err.message === 'WRONG MATERIAL') {
+          if (box) box.innerHTML = '<div class="warn-panel"><div class="big-ok">⚠ WRONG MATERIAL</div>' +
+            '<p class="hint">That roll does not match this line. The mismatch was flagged as an exception — it was not silently accepted.</p></div>';
+          setTimeout(render, 1800);
+        } else {
+          toast((err && err.message) || 'Verification failed.');
+          render();
+        }
+      });
+    }
+    if ($('#lo-exception')) $('#lo-exception').onclick = function () {
+      var wrap = document.createElement('div');
+      wrap.innerHTML = '<div class="card"><div class="label">EXCEPTION TYPE</div><div class="field">' +
+        '<select class="input" id="lo-extype">' +
+        LOADOUT_EXCEPTION_TYPES.map(function (t) { return '<option>' + t + '</option>'; }).join('') +
+        '</select></div><div class="field"><label class="label">NOTES</label>' +
+        '<input class="input" id="lo-exnotes" autocomplete="off"></div>' +
+        '<button class="btn btn-primary" id="lo-exgo">FLAG EXCEPTION</button></div>';
+      $('#lo-exception').parentNode.insertBefore(wrap, $('#lo-exception').nextSibling);
+      $('#lo-exgo').onclick = function () {
+        run6Call(Repository.createLoadoutException(lo.id, null, $('#lo-extype').value, $('#lo-exnotes').value),
+          function () { good(); toast('Exception flagged.'); render(); },
+          function (err) { bad(); toast((err && err.message) || 'Could not flag exception.'); });
+      };
+    };
+    if ($('#lo-complete')) $('#lo-complete').onclick = function () {
+      showConfirm({ title: 'Complete loadout ' + lo.number + '?',
+        body: 'All lines must be marked loaded. This cannot be undone.', okLabel: 'COMPLETE LOADOUT' })
+        .then(function (okc) {
+          if (!okc) return;
+          run6Call(Repository.completeLoadout(lo.id), function () {
+            good(); toast('Loadout completed. Job leaves the warehouse.');
+            render();
+          }, function (err) { bad(); toast((err && err.message) || 'Loadout is not complete.'); });
+        });
+    };
+  } };
+};
+
+/* ---------- /receipts ---------- */
+var RC7 = { q: '' };
+Screens['receipts'] = function (param) {
+  var parts = String(param || '').split('/');
+  var tab = (parts[0] || 'EXPECTED').toUpperCase().replace(/_/g, ' ');
+  if (receiptTabs().indexOf(tab) < 0) tab = 'EXPECTED';
+  var pol = orderPolicy();
+  var tabs = receiptTabs().map(function (t) {
+    var n = receiptsByTab(t).length;
+    return '<button class="fchip' + (t === tab ? ' on' : '') + '" data-tab="' + t + '">' + t +
+      ' <b class="badge">' + n + '</b></button>';
+  }).join('');
+  function cardHtml() {
+    var q = (RC7.q || '').toUpperCase();
+    var list = receiptsByTab(tab).filter(function (r) {
+      if (!q) return true;
+      var hay = [r.number, r.supplier, r.referenceNumber, r.status,
+        (r.lines || []).map(function (l) { return (l.barcode || '') + ' ' + (l.style || ''); }).join(' ')
+      ].join(' ').toUpperCase();
+      return hay.indexOf(q) >= 0;
+    });
+    return list.length ? list.map(receiptCardHtml).join('') : '<p class="hint">No receipts here.</p>';
+  }
+  var html =
+    '<div class="screen">' +
+    pageHead('📥 Receipts', 'Material entering the warehouse') +
+    (pol.canReceiveMaterial ? '<button class="btn btn-primary btn-huge" id="rc-new">+ NEW RECEIPT</button>' : '') +
+    '<div class="chiprow">' + tabs + '</div>' +
+    '<div class="card"><div class="field"><label class="label" for="rc7-q">SEARCH</label>' +
+    '<input class="input" id="rc7-q" autocomplete="off" placeholder="Receipt #, supplier, reference, roll…"></div></div>' +
+    '<div id="rc7-list">' + cardHtml() + '</div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    RC7.q = '';
+    if ($('#rc-new')) $('#rc-new').onclick = function () { go('receipt/new'); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tab]'), function (b) {
+      b.onclick = function () { go('receipts', b.getAttribute('data-tab')); };
+    });
+    var qi = $('#rc7-q'), qt = null;
+    qi.addEventListener('input', function () {
+      clearTimeout(qt);
+      qt = setTimeout(function () {
+        RC7.q = qi.value; $('#rc7-list').innerHTML = cardHtml(); wireCards();
+      }, 250);
+    });
+    function wireCards() {
+      Array.prototype.forEach.call(document.querySelectorAll('[data-receipt]'), function (b) {
+        b.onclick = function () { go('receipt', b.getAttribute('data-receipt')); };
+      });
+    }
+    wireCards();
+  } };
+};
+
+/* ---------- /receipt/new ---------- */
+Screens['receipt/new'] = function () {
+  var pol = orderPolicy();
+  if (!pol.canReceiveMaterial)
+    return { html: '<div class="screen">' + pageHead('New receipt', 'Receipts') +
+      '<div class="card"><p class="hint">Not authorized to receive material.</p></div></div>' };
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← RECEIPTS</button>' +
+    '<div class="step-head">NEW RECEIPT</div>' +
+    '<div class="card">' +
+    '<div class="field"><label class="label">SUPPLIER / MANUFACTURER (optional)</label>' +
+    '<input class="input" id="nr-supplier" autocomplete="off" placeholder="e.g. Shaw"></div>' +
+    '<div class="field"><label class="label">REFERENCE NUMBER (optional)</label>' +
+    '<input class="input mono" id="nr-ref" autocomplete="off" placeholder="e.g. BOL-88231"></div>' +
+    '<div class="field"><label class="label">RECEIPT TYPE</label>' +
+    '<select class="input" id="nr-kind">' +
+    '<option value="manual">FREE / MANUAL RECEIPT — start receiving now</option>' +
+    '<option value="expected">EXPECTED RECEIPT — arrives later</option>' +
+    '</select></div>' +
+    '<div class="field"><label class="label">NOTES (optional)</label>' +
+    '<input class="input" id="nr-notes" autocomplete="off"></div>' +
+    '<div class="err" id="nr-err" hidden></div>' +
+    '<button class="btn btn-primary btn-huge" id="nr-go">CREATE RECEIPT</button>' +
+    '</div></div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('receipts'); };
+    $('#nr-go').onclick = function () {
+      run6Call(Repository.createReceipt({
+        supplier: $('#nr-supplier').value,
+        referenceNumber: $('#nr-ref').value,
+        expected: $('#nr-kind').value === 'expected',
+        notes: $('#nr-notes').value
+      }), function (res) {
+        good(); toast('Receipt ' + res.receipt.number + ' created.');
+        go('receipt', res.receipt.id);
+      }, function (err) {
+        bad(); var e = $('#nr-err'); e.textContent = (err && err.message) || 'Could not create receipt.'; e.hidden = false;
+      });
+    };
+  } };
+};
+
+/* ---------- /receipt ---------- */
+var RCVSCAN = null; /* { receiptId, phase, barcode, existing } — receive-roll flow state */
+Screens['receipt'] = function (param) {
+  var r = receiptById(param);
+  if (!r) { setTimeout(function () { go('receipts'); }, 0); return { html: '' }; }
+  var pol = orderPolicy();
+  var done = r.status === RECEIPT_STATUS.RECEIVED;
+  function lineHtml(l) {
+    var qty = l.uom === 'LF' && l.receivedQtyIn != null ? fmtLen(l.receivedQtyIn)
+      : (l.receivedQty != null ? l.receivedQty + ' ' + l.uom : '—');
+    return '<div class="trow"><div><b>' + esc(l.style || '') + (l.color ? ' / ' + esc(l.color) : '') + '</b> ' +
+      (l.status === RECEIPT_LINE_STATUS.EXCEPTION ? '<span class="chip chip-red">EXCEPTION</span>' : '') +
+      '<div class="sub">qty <b class="num">' + esc(qty) + '</b>' +
+      (l.rollId ? ' · roll <span class="mono">' + esc(l.rollId) + '</span>' : '') +
+      (l.location ? ' · loc <span class="mono">' + esc(l.location) + '</span>' : '') +
+      (l.exception ? ' · ' + esc(l.exception) : '') + '</div></div>' +
+      '<div class="sub">' + esc(l.receivedBy || '') + '<br>' + fmtDT(l.receivedAt) + '</div></div>';
+  }
+  function receivePanelHtml() {
+    if (done || !pol.canReceiveMaterial) return '';
+    if (!RCVSCAN || RCVSCAN.receiptId !== r.id) {
+      return '<button class="btn btn-primary btn-huge" id="rcv-start">SCAN ROLL BARCODE</button>';
+    }
+    var s = RCVSCAN;
+    if (s.phase === 'scan') {
+      var chips = (FG().rolls || []).map(function (x) {
+        return '<button class="demochip" data-rcode="' + esc(x.barcode || x.id) + '">' + esc(x.barcode || x.id) + '</button>';
+      }).join('');
+      return '<div class="card"><div class="label">SCAN ROLL BARCODE</div>' +
+        '<div class="cambox" id="rc-rollcam"><div class="camnote">Starting camera…</div></div>' +
+        '<form id="rc-scanform"><div class="field"><label class="label">OR TYPE / WEDGE THE BARCODE</label>' +
+        '<input class="input mono" id="rc-code" autocomplete="off" autocapitalize="characters"></div>' +
+        '<button class="btn btn-primary btn-huge" type="submit">FIND ROLL</button></form>' +
+        '<div class="demolabel">DEMO — TAP TO SIMULATE A SCAN</div><div class="demochips">' + chips + '</div>' +
+        '<div id="rc-scanresult"></div>' +
+        '<button class="btn btn-ghost" id="rc-scancel">CANCEL</button></div>';
+    }
+    if (s.phase === 'exists') {
+      var ex = s.existing;
+      var lastAct = (function () {
+        var evs = [];
+        (FG().cuts || []).forEach(function (c) { if (c.rollId === ex.id) evs.push({ at: c.at, t: 'Cut ' + fmtLen(c.inches) }); });
+        (FG().inventoryAssignments || []).forEach(function (a) { if (a.rollId === ex.id) evs.push({ at: a.at, t: 'Assigned to WO' }); });
+        evs.sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
+        return evs.length ? evs[0].t + ' · ' + fmtDT(evs[0].at) : '—';
+      })();
+      return '<div class="card"><div class="warn-panel"><div class="big-ok">ROLL ALREADY EXISTS</div>' +
+        '<p class="hint">This barcode is already in FloorGuard. It was <b>not</b> duplicated.</p></div>' +
+        '<div class="kv"><span class="k">Roll</span><span class="mono">' + esc(ex.id) + '</span></div>' +
+        '<div class="kv"><span class="k">Material</span><span>' + esc(ex.style || '') + (ex.color ? ' / ' + esc(ex.color) : '') + '</span></div>' +
+        '<div class="kv"><span class="k">Current location</span><span class="mono">' + esc(ex.expectedLocation || '—') + '</span></div>' +
+        '<div class="kv"><span class="k">Current balance</span><span class="num">' + fmtLen(systemBalance(ex.id)) + '</span></div>' +
+        '<div class="kv"><span class="k">Last activity</span><span>' + esc(lastAct) + '</span></div>' +
+        (pol.canReviewExceptions ?
+          '<p class="hint">Supervisor: acknowledge this as a duplicate receipt to log a DUPLICATE ROLL exception without creating a new roll or touching the balance.</p>' +
+          '<button class="btn" id="rc-dupack">ACKNOWLEDGE DUPLICATE ROLL</button>' : '') +
+        '<button class="btn btn-ghost" id="rc-scancel">BACK</button></div>';
+    }
+    /* phase 'create' — new roll form */
+    return '<div class="card"><div class="label">RECEIVE NEW ROLL — <span class="mono">' + esc(s.barcode) + '</span></div>' +
+      '<div class="field"><label class="label">STYLE *</label><input class="input" id="rc-style" autocomplete="off"></div>' +
+      '<div class="field"><label class="label">COLOR</label><input class="input" id="rc-color" autocomplete="off"></div>' +
+      '<div class="field"><label class="label">MANUFACTURER</label><input class="input" id="rc-mfr" autocomplete="off"></div>' +
+      '<div class="field"><label class="label">WIDTH (INCHES)</label>' +
+      '<input class="input num" id="rc-width" inputmode="numeric" autocomplete="off" placeholder="e.g. 144"></div>' +
+      '<div class="label">RECEIVED LENGTH *</div>' +
+      '<div class="btn-row"><div class="field" style="flex:1"><label class="label">FEET</label>' +
+      '<input class="input num" id="rc-ft" inputmode="numeric" autocomplete="off" placeholder="0"></div>' +
+      '<div class="field" style="flex:1"><label class="label">INCHES</label>' +
+      '<input class="input num" id="rc-in" inputmode="decimal" autocomplete="off" placeholder="0"></div></div>' +
+      '<div class="field"><label class="label">INITIAL LOCATION</label>' +
+      '<input class="input mono" id="rc-loc" autocomplete="off" autocapitalize="characters" placeholder="e.g. 205B"></div>' +
+      '<div class="err" id="rc-err" hidden></div>' +
+      '<button class="btn btn-primary btn-huge" id="rc-receive">RECEIVE ROLL</button>' +
+      '<button class="btn btn-ghost" id="rc-scancel">CANCEL</button></div>';
+  }
+  var docs = receiptDocuments(r.id);
+  var exHtml = (r.exceptions || []).length ? '<h2>Exceptions</h2>' + (r.exceptions || []).map(function (e) {
+    return '<div class="trow"><div><b>' + esc(e.type) + '</b>' +
+      (e.notes ? '<div class="sub">' + esc(e.notes) + '</div>' : '') + '</div>' +
+      '<div class="sub">' + esc(e.by || '') + '<br>' + fmtDT(e.at) + '</div></div>';
+  }).join('') : '';
+  var actHtml = (function () {
+    var evs = receiptEventsFor(r.id);
+    if (!evs.length) return '<p class="hint">No activity yet.</p>';
+    return evs.map(function (e) {
+      return '<div class="trow"><div><b>' + esc(RECEIPT_EVENT_LABELS[e.action] || e.action) + '</b>' +
+        (e.detail ? '<div class="sub">' + esc(e.detail) + '</div>' : '') +
+        (e.rollId ? ' <span class="mono">' + esc(e.rollId) + '</span>' : '') + '</div>' +
+        '<div class="sub">' + esc(e.user || '') + '<br>' + fmtDT(e.at) + '</div></div>';
+    }).join('');
+  })();
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← RECEIPTS</button>' +
+    pageHead('📥 ' + esc(r.number), 'Receipt detail') +
+    '<div class="card">' +
+    '<div class="kv"><span class="k">Status</span><span>' + receiptStatusChip(r.status) + '</span></div>' +
+    '<div class="kv"><span class="k">Supplier</span><span>' + esc(r.supplier || '—') + '</span></div>' +
+    (r.referenceNumber ? '<div class="kv"><span class="k">Reference</span><span class="mono">' + esc(r.referenceNumber) + '</span></div>' : '') +
+    '<div class="kv"><span class="k">Received by</span><span>' + esc(r.createdBy || '—') + ' · ' + fmtDT(r.createdAt) + '</span></div>' +
+    (r.completedAt ? '<div class="kv"><span class="k">Completed</span><span>' + esc(r.completedBy || '') + ' · ' + fmtDT(r.completedAt) + '</span></div>' : '') +
+    (r.notes ? '<div class="kv"><span class="k">Notes</span><span>' + esc(r.notes) + '</span></div>' : '') +
+    '</div>' +
+    '<h2>Receive material</h2>' +
+    receivePanelHtml() +
+    (done || !pol.canReceiveMaterial ? '' :
+      '<button class="btn" id="rc-manual">+ ADD MANUAL LINE (non-carpet)</button>') +
+    '<h2>Lines (' + (r.lines || []).length + ')</h2>' +
+    '<div class="card">' + ((r.lines || []).length ? (r.lines || []).map(lineHtml).join('') : '<p class="hint">No lines yet.</p>') + '</div>' +
+    '<h2>Documents (' + docs.length + ')</h2>' +
+    '<div class="card">' +
+    (docs.length ? docs.map(function (d) {
+      return '<button class="rowbtn" data-docview="' + esc(d.id) + '"><div class="rhead"><b>HISTORY CARD</b> ' +
+        '<span class="sub">' + fmtDT(d.at) + '</span></div><div class="sub">' + esc(d.employee || '') + '</div></button>';
+    }).join('') : '<p class="hint">No documents captured.</p>') +
+    (done || !pol.canReceiveMaterial ? '' : '<button class="btn" id="rc-doc">📷 CAPTURE DOCUMENT</button>') +
+    '</div>' +
+    (done || !pol.canReceiveMaterial ? '' : '<button class="btn" id="rc-exception">⚠ FLAG RECEIPT EXCEPTION</button>') +
+    (!done && pol.canCompleteReceipt ? '<button class="btn btn-primary btn-huge" id="rc-complete">COMPLETE RECEIPT</button>' : '') +
+    exHtml +
+    '<h2>Activity</h2><div class="card">' + actHtml + '</div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { RCVSCAN = null; go('receipts'); };
+    if ($('#rcv-start')) $('#rcv-start').onclick = function () {
+      RCVSCAN = { receiptId: r.id, phase: 'scan' }; render();
+    };
+    if ($('#rc-scancel')) $('#rc-scancel').onclick = function () { RCVSCAN = null; render(); };
+    if ($('#rc-scanform')) {
+      mountScannerBox('rc-rollcam', onScanCode);
+      $('#rc-scanform').onsubmit = function (e) { e.preventDefault(); onScanCode($('#rc-code').value); };
+      Array.prototype.forEach.call(document.querySelectorAll('[data-rcode]'), function (c) {
+        c.onclick = function () { onScanCode(c.getAttribute('data-rcode')); };
+      });
+    }
+    function onScanCode(code) {
+      var norm = normalizeBarcode(String(code || ''));
+      if (!norm) { bad(); return; }
+      var existing = rollByBarcode(norm) || rollById(norm);
+      if (existing) {
+        RCVSCAN = { receiptId: r.id, phase: 'exists', barcode: norm, existing: existing };
+      } else {
+        RCVSCAN = { receiptId: r.id, phase: 'create', barcode: norm };
+      }
+      good(); render();
+    }
+    if ($('#rc-dupack')) $('#rc-dupack').onclick = function () {
+      showConfirm({ title: 'Acknowledge duplicate roll?',
+        body: 'Logs a DUPLICATE ROLL exception against the existing roll. No new roll is created and the balance is untouched.',
+        okLabel: 'ACKNOWLEDGE' }).then(function (okc) {
+        if (!okc) return;
+        run6Call(Repository.receiveRoll(r.id, {
+          barcode: RCVSCAN.barcode, style: (RCVSCAN.existing.style || 'UNKNOWN'),
+          lengthIn: 1, supervisorOverride: true, clientRequestId: rid('CRQ')
+        }), function () { good(); RCVSCAN = null; render(); },
+        function (err) { bad(); toast((err && err.message) || 'Could not acknowledge.'); });
+      });
+    };
+    if ($('#rc-receive')) $('#rc-receive').onclick = function () {
+      var ft = parseFloat($('#rc-ft').value) || 0, inch = parseFloat($('#rc-in').value) || 0;
+      var len = Math.round(ft * 12 + inch);
+      var errBox = $('#rc-err');
+      run6Call(Repository.receiveRoll(r.id, {
+        barcode: RCVSCAN.barcode,
+        style: $('#rc-style').value, color: $('#rc-color').value,
+        manufacturer: $('#rc-mfr').value,
+        widthIn: $('#rc-width').value ? Number($('#rc-width').value) : null,
+        lengthIn: len, location: $('#rc-loc').value,
+        clientRequestId: rid('CRQ')
+      }), function (res) {
+        if (res.duplicate) { toast('Already received — no duplicate created.'); }
+        else { good(); toast('Roll ' + res.roll.id + ' received (' + fmtLen(len) + ').'); }
+        RCVSCAN = null; render();
+      }, function (err) {
+        bad(); errBox.textContent = (err && err.message) || 'Could not receive roll.'; errBox.hidden = false;
+      });
+    };
+    if ($('#rc-manual')) $('#rc-manual').onclick = function () {
+      var wrap = document.createElement('div');
+      wrap.innerHTML = '<div class="card"><div class="label">MANUAL RECEIPT LINE</div>' +
+        '<div class="field"><label class="label">MATERIAL TYPE</label><select class="input" id="ml-type">' +
+        ORDER_MATERIAL_TYPES.map(function (t) { return '<option>' + t + '</option>'; }).join('') + '</select></div>' +
+        '<div class="field"><label class="label">PRODUCT / STYLE *</label><input class="input" id="ml-style" autocomplete="off"></div>' +
+        '<div class="field"><label class="label">COLOR</label><input class="input" id="ml-color" autocomplete="off"></div>' +
+        '<div class="field"><label class="label">QUANTITY *</label><input class="input num" id="ml-qty" inputmode="decimal" autocomplete="off"></div>' +
+        '<div class="field"><label class="label">UOM</label><select class="input" id="ml-uom">' +
+        ORDER_UOMS.map(function (t) { return '<option>' + t + '</option>'; }).join('') + '</select></div>' +
+        '<button class="btn btn-primary" id="ml-go">ADD LINE</button></div>';
+      $('#rc-manual').parentNode.insertBefore(wrap, $('#rc-manual').nextSibling);
+      $('#ml-go').onclick = function () {
+        run6Call(Repository.addReceiptLine(r.id, {
+          materialType: $('#ml-type').value, style: $('#ml-style').value, color: $('#ml-color').value,
+          receivedQty: Number($('#ml-qty').value), uom: $('#ml-uom').value, clientRequestId: rid('CRQ')
+        }), function () { good(); toast('Line added.'); render(); },
+        function (err) { bad(); toast((err && err.message) || 'Could not add line.'); });
+      };
+    };
+    if ($('#rc-exception')) $('#rc-exception').onclick = function () {
+      var wrap = document.createElement('div');
+      wrap.innerHTML = '<div class="card"><div class="label">EXCEPTION TYPE</div><div class="field">' +
+        '<select class="input" id="rc-extype">' +
+        RECEIPT_EXCEPTION_TYPES.map(function (t) { return '<option>' + t + '</option>'; }).join('') +
+        '</select></div><div class="field"><label class="label">NOTES</label>' +
+        '<input class="input" id="rc-exnotes" autocomplete="off"></div>' +
+        '<button class="btn btn-primary" id="rc-exgo">FLAG EXCEPTION</button></div>';
+      $('#rc-exception').parentNode.insertBefore(wrap, $('#rc-exception').nextSibling);
+      $('#rc-exgo').onclick = function () {
+        run6Call(Repository.createReceiptException(r.id, $('#rc-extype').value, $('#rc-exnotes').value),
+          function () { good(); toast('Exception flagged.'); render(); },
+          function (err) { bad(); toast((err && err.message) || 'Could not flag exception.'); });
+      };
+    };
+    if ($('#rc-doc')) $('#rc-doc').onclick = function () {
+      if (typeof D !== 'undefined') {
+        D = { receiptId: r.id, returnTo: { name: 'receipt', param: r.id } };
+        go('receipt/doc');
+      }
+    };
+    if ($('#rc-complete')) $('#rc-complete').onclick = function () {
+      showConfirm({ title: 'Complete receipt ' + r.number + '?',
+        body: (r.lines || []).length + ' line(s), ' + (r.exceptions || []).length + ' exception(s). Material becomes available to inventory.',
+        okLabel: 'COMPLETE RECEIPT' }).then(function (okc) {
+        if (!okc) return;
+        run6Call(Repository.completeReceipt(r.id), function () {
+          good(); toast('Receipt completed.');
+          render();
+        }, function (err) { bad(); toast((err && err.message) || 'Could not complete receipt.'); });
+      });
+    };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-docview]'), function (b) {
+      b.onclick = function () { go('doc', b.getAttribute('data-docview')); };
+    });
+  } };
+};
+
+/* ---------- receipt document capture (reuses the history-card pipeline) ---------- */
+Screens['receipt/doc'] = function () {
+  if (typeof D === 'undefined' || !D || !D.receiptId) { setTimeout(function () { go('receipts'); }, 0); return { html: '' }; }
+  var rt = D.returnTo;
+  var html =
+    '<div class="screen">' +
+    '<div class="step-head">CAPTURE DOCUMENT</div>' +
+    '<div class="card" style="text-align:center">' +
+    '<div class="label">DOCUMENT FOR RECEIPT</div>' +
+    '<div class="mono" style="font-size:2rem;font-weight:900">' + esc((receiptById(D.receiptId) || {}).number || '') + '</div></div>' +
+    '<p class="hint">Photograph the packing slip or paper history card that arrived with this material. The photo becomes part of the receipt&rsquo;s permanent record.</p>' +
+    '<input type="file" id="docfile" accept="image/*" capture="environment" hidden>' +
+    '<button class="btn btn-primary btn-huge" id="takephoto">&#128247; TAKE PHOTO</button>' +
+    '<button class="btn btn-ghost" id="dccancel">CANCEL</button>' +
+    '<div class="err" id="dcerr" hidden></div></div>';
+  return { html: html, mount: function () {
+    $('#takephoto').onclick = function () { $('#docfile').click(); };
+    $('#dccancel').onclick = function () { D = null; if (rt) go(rt.name, rt.param); else history.back(); };
+    $('#docfile').onchange = function () {
+      var f = $('#docfile').files[0];
+      if (!f) return;
+      var e = $('#dcerr'); e.hidden = true;
+      var rd = new FileReader();
+      rd.onload = function () {
+        downscaleImage(rd.result, 1280, 0.72, function (img) {
+          if (!img) { bad(); e.textContent = 'Could not read that photo. Try again.'; e.hidden = false; return; }
+          downscaleImage(rd.result, 320, 0.6, function (th) {
+            D.image = img; D.thumb = th || img;
+            good(); go('receipt/doc/review');
+          });
+        });
+      };
+      rd.onerror = function () { bad(); e.textContent = 'Could not read that photo. Try again.'; e.hidden = false; };
+      rd.readAsDataURL(f);
+    };
+  } };
+};
+Screens['receipt/doc/review'] = function () {
+  if (typeof D === 'undefined' || !D || !D.image) { setTimeout(function () { go('receipts'); }, 0); return { html: '' }; }
+  var rt = D.returnTo;
+  var html =
+    '<div class="screen">' +
+    '<div class="step-head">REVIEW DOCUMENT</div>' +
+    '<div class="card" style="text-align:center"><img src="' + D.image + '" style="max-width:100%"></div>' +
+    '<button class="btn btn-primary btn-huge" id="dc-use">USE PHOTO</button>' +
+    '<button class="btn" id="dc-retake">RETAKE</button>' +
+    '<button class="btn btn-ghost" id="dc-cancel">CANCEL</button>' +
+    '<div class="err" id="dcerr" hidden></div></div>';
+  return { html: html, mount: function () {
+    $('#dc-retake').onclick = function () { go('receipt/doc'); };
+    $('#dc-cancel').onclick = function () { D = null; if (rt) go(rt.name, rt.param); else history.back(); };
+    $('#dc-use').onclick = function () {
+      var rid7 = D.receiptId, img = D.image, th = D.thumb;
+      var e = $('#dcerr'); e.hidden = true;
+      /* Run 7: repository-backed — in Shared Pilot the image bytes go to
+         private storage and the metadata row links receipt_id; the local
+         path keeps the previous device-local behavior. */
+      run6Call(Repository.uploadReceiptDocument({ receiptId: rid7,
+        imageDataUrl: img, thumbDataUrl: th, mimeType: 'image/jpeg',
+        employee: DB.data.currentEmployee }), function () {
+        logReceiptEvent('DOCUMENT_CAPTURED', { receiptId: rid7,
+          receiptNumber: (receiptById(rid7) || {}).number,
+          detail: 'Document captured by ' + DB.data.currentEmployee + '.' });
+        D = null; good();
+        if (rt) go(rt.name, rt.param); else history.back();
+      }, function (err) {
+        bad(); e.textContent = (err && err.message) || 'Could not save document.'; e.hidden = false;
+      });
+    };
+  } };
+};
+
+
 /* Hub: NEEDS INVENTORY / ASSIGNED / COMPLETED + search + filters.
    Also honors assign-inventory?workOrder=XS024536 (query) and
    assign-inventory/wo/<id> (path) entry from a work order. */
@@ -5719,9 +7148,19 @@ function ledgerHtml(roll) {
     }
   });
   ev.sort(function (a, b) { return new Date(a.at) - new Date(b.at); });
+  /* Run 7: a roll created by receiving shows its receipt as the first event.
+     Receiving never changes a balance — it establishes it. */
+  var r7receipt = roll.receiptId ? receiptById(roll.receiptId) : null;
   var out = '<div class="ledger-row"><span class="dot" style="background:var(--muted)"></span>' +
     '<div class="what"><b>Beginning Balance</b></div>' +
-    '<div class="bal num">' + fmtLen(roll.beginningIn) + '</div></div>';
+    '<div class="bal num">' + fmtLen(roll.beginningIn) + '</div></div>' +
+    (r7receipt ?
+      '<div class="ledger-row"><span class="dot" style="background:var(--green)"></span>' +
+      '<div class="what"><b>Roll Received</b> <span class="mono">' + esc(r7receipt.number) + '</span>' +
+      '<div class="sub">' + esc(r7receipt.supplier || 'Manual receipt') + ' · by ' + esc(roll.receivedBy || '') +
+      ' · ' + fmtDT(roll.receivedAt) + '</div></div>' +
+      '<div class="bal num">' + fmtLen(roll.beginningIn) + '</div></div>'
+      : '');
   var bal = roll.beginningIn;
   ev.forEach(function (e) {
     if (e.kind === 'cut') {
