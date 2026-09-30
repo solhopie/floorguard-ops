@@ -907,7 +907,7 @@ Screens.settings = function () {
       '<button class="btn btn-primary" type="submit">ADD EMPLOYEE</button>' +
       '</form></div>' +
       '<div class="card"><h2>About</h2>' +
-      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 1)</span></div>' +
+      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 3)</span></div>' +
       '<div class="kv"><span class="k">Storage key</span><span class="mono">' + esc(DB.KEY) + '</span></div>' +
       '<div class="kv"><span class="k">Schema</span><span class="num">v' + DB.SCHEMA + '</span></div>' +
       '</div>' +
