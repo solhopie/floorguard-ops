@@ -25,7 +25,7 @@ function daypart() {
   return 'evening';
 }
 
-var APP_VERSION = '0.1.0';
+var APP_VERSION = '0.2.0';
 
 /* ---------------- data layer ----------------
    One localStorage key, schema version, per-module namespaces.
@@ -1323,7 +1323,8 @@ function newRapid() {
   R = { activeLoc: null, scan: null, lastMsg: null };
 }
 
-/* ---- prototype lines 605-607 ---- */
+/* ---- prototype lines 604-607 ---- */
+function needRoll()   { if (!S || !S.roll) { go('dashboard'); return false; } return true; }
 function needLoc()    { if (!needRoll() || !S.scannedLoc) { go('dashboard'); return false; } return true; }
 function needBalance(){ if (!needLoc() || S.physicalIn == null) { go('dashboard'); return false; } return true; }
 
@@ -1465,7 +1466,7 @@ Screens['count/standard/loc'] = function () {
       '<button class="btn btn-primary btn-huge" id="cont">CONTINUE &rarr; ENTER BALANCE</button>';
     $('#cont').onclick = function () {
       var dup = recentCountForRoll(S.roll.id, 24 * 3600 * 1000);
-      go(dup ? 'dup' : 'balance');
+      go(dup ? 'count/standard/dup' : 'count/standard/balance');
     };
     $('#cont').scrollIntoView(false);
   }
@@ -1582,7 +1583,7 @@ Screens['count/standard/balance'] = function () {
       if (err) { bad(); var e = $('#balerr'); e.textContent = err; e.hidden = false; return; }
       S.physicalIn = Math.round(ft * 12 + inch);
       good();
-      go(normLoc(S.scannedLoc) !== normLoc(S.roll.expectedLocation) ? 'mismatch' : 'confirm');
+      go(normLoc(S.scannedLoc) !== normLoc(S.roll.expectedLocation) ? 'count/standard/mismatch' : 'count/standard/confirm');
     };
   }};
 };

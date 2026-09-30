@@ -18,7 +18,8 @@ function makeEl(id) {
     setAttribute: function () {}, getAttribute: function () { return null; },
     querySelector: function () { return makeEl(id + ':q'); },
     querySelectorAll: function () { return []; },
-    focus: function () {}, click: function () { if (this.onclick) this.onclick(); }, remove: function () {}
+    focus: function () {}, click: function () { if (this.onclick) this.onclick(); }, remove: function () {},
+    scrollIntoView: function () {}
   };
 }
 function elFor(id) { return els[id] || (els[id] = makeEl(id)); }
@@ -296,6 +297,48 @@ ok(wo2.opStatus === 'IN_PROGRESS', 'OPEN order moves to IN_PROGRESS on first cut
 var wocut = S.FG().cuts[S.FG().cuts.length - 1];
 ok(wocut.order === 'WO-1002' && wocut.rollId === 'TK7M2QA', 'cut record carries the work-order number');
 ok(S.systemBalance('TK7M2QA') === 1240 - 60, 'cut subtracts from the system balance');
+
+/* ---------- Standard flow navigation (regression: needRoll + route targets) ---------- */
+freshDB();
+ok(typeof S.needRoll === 'function', 'needRoll is defined');
+S.newSession();
+ok(S.needRoll() === false, 'needRoll guards a missing roll');
+ok(S.window.location.hash === '#/dashboard', 'needRoll redirects without a roll');
+S.window.location.hash = '';
+S.newSession();
+S.S.roll = S.rollByBarcode('QH5CPHN');
+ok(S.needRoll() === true, 'needRoll passes with a roll');
+var stdLoc = S.Screens['count/standard/loc']();
+ok(stdLoc.html.indexOf('SCAN LOCATION') >= 0, 'standard location screen renders');
+stdLoc.mount();
+elFor('manual').value = '205B';
+elFor('manualform').onsubmit({ preventDefault: function () {} });
+elFor('cont').onclick();
+ok(S.window.location.hash === '#/count/standard/dup',
+   'seeded recent count routes to the duplicate screen (24h guard)');
+/* with no recent count -> balance step */
+S.FG().counts = [];
+S.window.location.hash = '';
+elFor('cont').onclick();
+ok(S.window.location.hash === '#/count/standard/balance',
+   'location continue routes to the balance step (no recent count)');
+/* with a recent count for the roll -> duplicate warning route */
+S.FG().counts.push({ id: 'C-DUP', rollId: 'QH5CPHN', at: new Date().toISOString() });
+S.window.location.hash = '';
+elFor('cont').onclick();
+ok(S.window.location.hash === '#/count/standard/dup', 'recent count routes to the duplicate screen');
+/* balance step: matching location -> confirm, wrong location -> mismatch */
+S.S.scannedLoc = '205B';
+var stdBal = S.Screens['count/standard/balance']();
+stdBal.mount();
+elFor('ft').value = '44'; elFor('inch').value = '8';
+S.window.location.hash = '';
+elFor('cont').onclick();
+ok(S.window.location.hash === '#/count/standard/confirm', 'matching location routes to confirm');
+S.S.scannedLoc = '206A';
+S.window.location.hash = '';
+elFor('cont').onclick();
+ok(S.window.location.hash === '#/count/standard/mismatch', 'wrong location routes to mismatch');
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed ? 1 : 0);
