@@ -25,7 +25,7 @@ function daypart() {
   return 'evening';
 }
 
-var APP_VERSION = '0.5.0';
+var APP_VERSION = '0.6.0';
 
 /* ---------------- data layer ----------------
    One localStorage key, schema version, per-module namespaces.
@@ -33,15 +33,18 @@ var APP_VERSION = '0.5.0';
    through DB.ns('<module-key>'). */
 var DB = {
   KEY: 'floorguard_ops_v1',
-  SCHEMA: 4,
+  SCHEMA: 5,
   data: null,
   seed: function () {
     return {
-      schema: 4,
+      schema: 5,
       currentEmployee: null,
       employees: ['Marcus', 'Dana', 'Luis'],
       employeeRoles: { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' },
-      warehouses: [{ id: 'main', name: 'Main Warehouse' }],
+      /* Run 6 §0: every warehouse carries an explicit IANA timezone.
+         Warehouse-local date, reports, and audit display always use it —
+         never the tablet/browser timezone alone. */
+      warehouses: [{ id: 'main', name: 'Main Warehouse', timezone: 'America/New_York' }],
       currentWarehouse: 'main',
       modules: {},       /* per-module namespaces, created on demand via DB.ns() */
       settings: {}
@@ -52,13 +55,27 @@ var DB = {
       var raw = localStorage.getItem(this.KEY);
       if (raw) {
         var d = JSON.parse(raw);
-        if (d && d.schema === 4) { this.data = d; ensureFloorguardStore(); return; }
-        if (d && d.schema === 3) {
-          /* v3 -> v4: Run 5 scheduled-job fields on work orders.
-             Readiness stays derived; no stored state to drift. */
-          d.schema = 4;
+        if (d && d.schema === 5) { this.data = d; ensureFloorguardStore(); return; }
+        if (d && d.schema === 4) {
+          /* v4 -> v5: Run 6. Explicit warehouse timezone (America/New_York
+             default — the pilot warehouse's real zone; never the browser's).
+             Run 6 order collections are initialized by ensureFloorguardStore. */
+          (d.warehouses || []).forEach(function (w) { if (!w.timezone) w.timezone = 'America/New_York'; });
+          d.schema = 5;
           this.data = d;
           migrateFloorguardV3toV4();
+          migrateFloorguardV4toV5();
+          this.save();
+          return;
+        }
+        if (d && d.schema === 3) {
+          /* v3 -> v4 -> v5: Run 5 scheduled-job fields, then Run 6 order
+             collections + explicit warehouse timezone. */
+          (d.warehouses || []).forEach(function (w) { if (!w.timezone) w.timezone = 'America/New_York'; });
+          d.schema = 5;
+          this.data = d;
+          migrateFloorguardV3toV4();
+          migrateFloorguardV4toV5();
           this.save();
           return;
         }
@@ -69,20 +86,22 @@ var DB = {
           this.data = d;
           migrateFloorguardV2toV3();
           migrateFloorguardV3toV4();
-          d.schema = 4;
+          migrateFloorguardV4toV5();
+          d.schema = 5;
           this.save();
           return;
         }
         if (d && d.schema === 1) {
           /* v1 -> v2: add warehouse context + roles, seed the shared
              FloorGuard inventory store. Run 1 session data is kept. */
-          d.schema = 4;
-          if (!d.warehouses) d.warehouses = [{ id: 'main', name: 'Main Warehouse' }];
+          d.schema = 5;
+          if (!d.warehouses) d.warehouses = [{ id: 'main', name: 'Main Warehouse', timezone: 'America/New_York' }];
           if (!d.currentWarehouse) d.currentWarehouse = 'main';
           if (!d.employeeRoles) d.employeeRoles = { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' };
           this.data = d;
           migrateFloorguardV2toV3();
           migrateFloorguardV3toV4();
+          migrateFloorguardV4toV5();
           this.save();
           return;
         }
@@ -319,7 +338,53 @@ function seedFloorguard() {
         consumedAt: at(1 * D + 2 * H), consumedBy: 'Marcus', cutId: 'K7', actualCutIn: 240 }
     ],
     /* Run 3: append-only audit trail for every assignment action. */
-    assignmentEvents: []
+    assignmentEvents: [],
+    /* Run 6: order / sales-order foundation. orders: commercial drafts;
+       salesOrders: submitted records that generate warehouse work orders;
+       orderEvents: append-only audit for both. seq: number counters. */
+    orders: [
+      /* Fictional development order (SUBMITTED): the source behind SO-100245. */
+      { id: 'ORD-1000', number: 'ORD-1000', property: 'Ventura Pointe', account: 'Willowbridge',
+        requestedDate: dstr(-2), scheduledDate: dstr(0), priority: 'NORMAL',
+        createdBy: 'Marcus', warehouseId: 'main', internalRef: 'DEV-REF-1',
+        notes: 'Fictional development order.', status: 'SUBMITTED',
+        items: [
+          { id: 'ORD-1000-I1', seq: 1, style: 'Marvel', color: 'Chrome', materialType: 'CARPET',
+            uom: 'LF', widthIn: 144, quantityIn: 237, quantity: null, notes: '' },
+          { id: 'ORD-1000-I2', seq: 2, style: 'Rebond Pad', color: 'Natural', materialType: 'PAD',
+            uom: 'LF', widthIn: 144, quantityIn: 237, quantity: null, notes: '' }
+        ],
+        createdAt: at(2 * D), updatedAt: at(2 * D), submittedAt: at(2 * D), salesOrderId: 'SO-100245' },
+      /* Fictional draft order: a starting point for the Order walkthrough. */
+      { id: 'ORD-1001', number: 'ORD-1001', property: '', account: '',
+        requestedDate: dstr(3), scheduledDate: '', priority: 'NORMAL',
+        createdBy: 'Marcus', warehouseId: 'main', internalRef: '',
+        notes: '', status: 'DRAFT',
+        items: [],
+        createdAt: at(1 * D), updatedAt: at(1 * D), submittedAt: null, salesOrderId: null }
+    ],
+    salesOrders: [
+      /* Fictional development sales order: OPEN, two lines, none released. */
+      { id: 'SO-100245', number: 'SO-100245', sourceOrderId: 'ORD-1000',
+        property: 'Ventura Pointe', account: 'Willowbridge', warehouseId: 'main',
+        priority: 'NORMAL', requestedDate: dstr(-2), scheduledDate: dstr(0),
+        status: 'OPEN', createdBy: 'Marcus', submittedBy: 'Marcus',
+        createdAt: at(2 * D), submittedAt: at(2 * D), updatedAt: at(2 * D),
+        notes: 'Fictional development sales order.',
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        lines: [
+          { id: 'SO-100245-L1', seq: 1, sourceItemId: 'ORD-1000-I1',
+            style: 'Marvel', color: 'Chrome', materialType: 'CARPET',
+            uom: 'LF', widthIn: 144, orderedIn: 237, orderedQty: null,
+            warehouseQtyRequired: 237, status: 'OPEN', workOrderId: null },
+          { id: 'SO-100245-L2', seq: 2, sourceItemId: 'ORD-1000-I2',
+            style: 'Rebond Pad', color: 'Natural', materialType: 'PAD',
+            uom: 'LF', widthIn: 144, orderedIn: 237, orderedQty: null,
+            warehouseQtyRequired: 237, status: 'OPEN', workOrderId: null }
+        ] }
+    ],
+    orderEvents: [],
+    seq: { order: 1002, salesOrder: 100246, workOrder: 2001 }
   };
 }
 
@@ -332,6 +397,23 @@ function ensureFloorguardStore() {
     DB.data.modules['floorguard'] = seedFloorguard();
     DB.save();
   }
+  migrateFloorguardV4toV5();
+}
+
+/* Run 6 (schema 5): order / sales-order collections on existing stores.
+   Idempotent — safe to run on fresh seeds and migrated stores alike. */
+function migrateFloorguardV4toV5() {
+  var fg = DB.data.modules['floorguard'];
+  if (!fg) return;
+  if (!fg.orders) fg.orders = [];
+  if (!fg.salesOrders) fg.salesOrders = [];
+  if (!fg.orderEvents) fg.orderEvents = [];
+  if (!fg.seq) fg.seq = { order: 1002, salesOrder: 100246, workOrder: 2001 };
+  /* Traceability fields on work orders (Run 6 §20/§22). */
+  (fg.workOrders || []).forEach(function (w) {
+    if (!('salesOrderId' in w)) w.salesOrderId = null;
+    if (!('salesOrderLineId' in w)) w.salesOrderLineId = null;
+  });
 }
 
 /* Reseed ONLY the inventory store (demo data). Session, employees,
@@ -493,10 +575,38 @@ function overReserved(rollId, newReservedIn) {
    cannot drift. */
 
 /* Warehouse-local calendar date as YYYY-MM-DD. */
+/* Run 6 §0: explicit IANA timezone per warehouse. Warehouse-local date,
+   scheduled-job grouping, reports, and audit display always derive from
+   this — never from the tablet/browser timezone alone. */
+function warehouseRecord() {
+  return ((DB.data && DB.data.warehouses) || [])
+    .filter(function (w) { return w.id === DB.data.currentWarehouse; })[0] || {};
+}
+function warehouseTimezone() {
+  return warehouseRecord().timezone || 'America/New_York';
+}
+/* Warehouse-local 'YYYY-MM-DD'. */
 function warehouseToday() {
-  var d = new Date();
-  var m = d.getMonth() + 1, day = d.getDate();
-  return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+  try {
+    /* en-CA formats as YYYY-MM-DD. */
+    return new Intl.DateTimeFormat('en-CA', { timeZone: warehouseTimezone() }).format(new Date());
+  } catch (e) {
+    var d = new Date();
+    var m = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+  }
+}
+/* Audit/activity timestamps, rendered in the warehouse timezone. */
+function fmtAuditTime(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleString([], {
+      timeZone: warehouseTimezone(), month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit'
+    });
+  } catch (e) {
+    return fmtDT(iso);
+  }
 }
 /* 'YYYY-MM-DD' -> Date at local midnight. */
 function dateStrToDate(ds) {
@@ -729,21 +839,47 @@ function assignEmployeeLocal(woId, assigneeId) {
     detail: nm ? 'Assigned to ' + nm + '.' : 'Unassigned.' });
   return { ok: true, workOrder: w };
 }
-/* Guard: every material line must be COMPLETED before warehouse completion. */
+/* Run 6 §0: the assigned warehouse employee may complete their own job. */
+function isWoAssignee(w) {
+  if (!w || !w.assigneeId || !DB.data) return false;
+  var cur = DB.data.currentEmployee;
+  if (woAssigneeName(w) === cur) return true;
+  return w.assigneeId === currentAssigneeId();
+}
+/* Guard: every material line must be COMPLETED before warehouse completion.
+   Run 6: count-based lines (PLANK/BOX/…) have no cut-based assignment engine
+   yet, so no automatic rule can verify them — completion is supervisor /
+   manager judgment and is recorded in the audit trail. The UI surfaces
+   them explicitly so nobody mistakes silence for verification. */
 function warehouseCompletionBlockers(wo) {
   var blockers = [];
   (wo.lines || []).forEach(function (l) {
+    if (l.requiredCount != null) return;
     var st = lineStatus(wo, l);
     if (st !== 'COMPLETED') blockers.push({ lineId: l.id, line: l, status: st });
   });
   return blockers;
 }
+function woCountBasedLines(wo) {
+  return ((wo && wo.lines) || []).filter(function (l) { return l.requiredCount != null; });
+}
 function completeWarehouseWorkLocal(woId) {
   var w = woById(woId);
   if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
-  if (!isSupervisorRole(DB.data.currentEmployee))
-    return { ok: false, err: 'SUPERVISOR ROLE REQUIRED' };
+  /* Run 6 §0: the assigned employee may complete their own job; supervisor /
+     manager / admin may complete any job. Line-completion guard is never
+     bypassed. */
+  if (!isSupervisorRole(DB.data.currentEmployee) && !isWoAssignee(w))
+    return { ok: false, err: 'NOT AUTHORIZED TO COMPLETE THIS JOB' };
   if (w.onHold) return { ok: false, err: 'JOB IS ON HOLD' };
+  /* Run 6: count-based lines (BOX/EA/…) have no cut-based verification
+     engine, so a plain assignee cannot self-certify them — a supervisor /
+     manager / admin sign-off is required and is recorded in the audit
+     trail below. */
+  var countLines = woCountBasedLines(w);
+  var isSup = isSupervisorRole(DB.data.currentEmployee);
+  if (!isSup && countLines.length)
+    return { ok: false, err: 'COUNT-BASED LINES REQUIRE SUPERVISOR VERIFICATION' };
   var blockers = warehouseCompletionBlockers(w);
   if (blockers.length) return { ok: false, err: 'MATERIAL LINES INCOMPLETE', blockers: blockers };
   w.opStatus = 'COMPLETE';
@@ -751,7 +887,27 @@ function completeWarehouseWorkLocal(woId) {
   w.warehouseCompletedBy = DB.data.currentEmployee;
   DB.save();
   logAssignEvent('WAREHOUSE_WORK_COMPLETED', { workOrderId: w.id,
-    detail: 'Warehouse work completed by ' + DB.data.currentEmployee + '.' });
+    detail: 'Warehouse work completed by ' + DB.data.currentEmployee + '.' +
+      (countLines.length ? ' (' + countLines.length + ' count-based line(s) accepted under supervisor judgment.)' : '') });
+  return { ok: true, workOrder: w };
+}
+/* Run 6 §0: authorized supervisor/manager roles may reopen a completed
+   warehouse job for later correction. Requires an audit reason. The job
+   returns to IN_PROGRESS; completion fields are cleared. */
+function reopenWarehouseWorkLocal(woId, reason) {
+  var w = woById(woId);
+  if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  if (!isSupervisorRole(DB.data.currentEmployee))
+    return { ok: false, err: 'SUPERVISOR ROLE REQUIRED' };
+  reason = String(reason || '').trim();
+  if (!reason) return { ok: false, err: 'REASON REQUIRED' };
+  if (w.opStatus !== 'COMPLETE') return { ok: false, err: 'JOB IS NOT COMPLETED' };
+  w.opStatus = 'IN_PROGRESS';
+  w.warehouseCompletedAt = null;
+  w.warehouseCompletedBy = null;
+  DB.save();
+  logAssignEvent('WAREHOUSE_WORK_REOPENED', { workOrderId: w.id,
+    detail: 'Warehouse job reopened by ' + DB.data.currentEmployee + ': ' + reason });
   return { ok: true, workOrder: w };
 }
 /* Notes are append-only audit events — never overwritten. */
@@ -1322,6 +1478,17 @@ Screens.dashboard = function () {
     qcard(qc.inProgress, 'In Progress', 'IN PROGRESS') +
     qcard(qc.waitingForInventory, 'Waiting for Inventory', 'TODAY', 'WAITING_FOR_INVENTORY') +
     qcard(qc.completedToday, 'Completed Today', 'COMPLETED') +
+    '</div>' +
+    /* Run 6: commercial pipeline cards — draft orders, open sales orders,
+       and lines already released to the warehouse. */
+    '<div class="sect">COMMERCIAL</div>' +
+    '<div class="qcards">' +
+    '<button class="qcard" data-croute="order">' +
+      '<span class="qnum">' + getDraftOrdersLocal().length + '</span><span class="qlabel">Draft Orders</span></button>' +
+    '<button class="qcard" data-croute="sales-orders/OPEN">' +
+      '<span class="qnum">' + salesOrdersByTab('OPEN').length + '</span><span class="qlabel">Open Sales Orders</span></button>' +
+    '<button class="qcard" data-croute="sales-orders/RELEASED">' +
+      '<span class="qnum">' + salesOrdersByTab('RELEASED').length + '</span><span class="qlabel">Released to Warehouse</span></button>' +
     '</div>';
   return {
     html:
@@ -1349,7 +1516,11 @@ Screens.dashboard = function () {
       var qs = document.querySelectorAll('.qcard');
       for (var j = 0; j < qs.length; j++) {
         (function (b) {
-          b.onclick = function () { go(b.getAttribute('data-qroute')); };
+          b.onclick = function () {
+            var cr = b.getAttribute('data-croute');
+            if (cr) { go(cr); return; }
+            go(b.getAttribute('data-qroute'));
+          };
         })(qs[j]);
       }
     }
@@ -1405,7 +1576,7 @@ Screens.settings = function () {
       '<div class="err" id="dm-err" hidden></div>' +
       '</div>' +
       '<div class="card"><h2>About</h2>' +
-      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 5)</span></div>' +
+      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 6)</span></div>' +
       '<div class="kv"><span class="k">Storage key</span><span class="mono">' + esc(DB.KEY) + '</span></div>' +
       '<div class="kv"><span class="k">Schema</span><span class="num">v' + DB.SCHEMA + '</span></div>' +
       '</div>' +
@@ -1750,6 +1921,19 @@ Screens['work-order'] = function (param) {
       '<div class="kv"><span class="k">Width</span><span class="v">' + fmtWidth(w.widthIn) + '</span></div>' +
       '<div class="kv"><span class="k">Quantity</span><span class="v num">' + esc(String(w.quantity)) + ' ' + esc(w.uom) + '</span></div>' +
     '</div>' +
+    /* Run 6: source sales order traceability card. */
+    (w.salesOrderId ? (function () {
+      var sso = salesOrderById(w.salesOrderId);
+      var slo = sso && soLineById(sso, w.salesOrderLineId);
+      return '<h2>Source sales order</h2>' +
+        '<div class="card">' +
+        '<div class="kv"><span class="k">Sales order</span><span class="v mono"><b>' +
+          esc(sso ? sso.number : w.salesOrderId) + '</b></span></div>' +
+        (slo ? '<div class="kv"><span class="k">Material line</span><span class="v">LINE ' + slo.seq +
+          ' · ' + esc(slo.style) + ' · ' + esc(orderItemQtyDisplay(slo)) + '</span></div>' : '') +
+        '<button class="btn" id="wo-so">VIEW SALES ORDER</button>' +
+        '</div>';
+    })() : '') +
     '<h2>Assigned inventory</h2>' +
     '<div class="card">' +
       (roll
@@ -1807,6 +1991,7 @@ Screens['work-order'] = function (param) {
   return { html: html, mount: function () {
     $('#back').onclick = function () { history.back(); };
     if ($('#goroll')) $('#goroll').onclick = function () { go('roll', w.rollId); };
+    if ($('#wo-so')) $('#wo-so').onclick = function () { go('sales-order', w.salesOrderId); };
     $('#wo-sj').onclick = function () { go('scheduled-job/' + w.id); };
     $('#wo-assign').onclick = function () {
       w.assigneeId = $('#wo-emp').value || null;
@@ -2292,6 +2477,15 @@ Screens['scheduled-job'] = function (param) {
               return esc(b.lineId) + ' (' + esc(b.status) + ')';
             }).join(', ') + '</p>' : '<p class="hint">All material lines complete — ready to close out.</p>')
         : '') +
+      (!isSup && isWoAssignee(w) && r !== JOB_STATES.COMPLETED
+        ? '<button class="btn btn-primary btn-huge" id="sj-complete">✔ COMPLETE MY JOB</button>' +
+          (blockers.length ? '<p class="hint">Blocked: ' + blockers.map(function (b) {
+              return esc(b.lineId) + ' (' + esc(b.status) + ')';
+            }).join(', ') + '</p>' : '<p class="hint">All material lines complete — ready to close out.</p>')
+        : '') +
+      (isSup && r === JOB_STATES.COMPLETED
+        ? '<button class="btn" id="sj-reopen" style="flex:1">↩ REOPEN JOB</button>'
+        : '') +
     '</div>' +
     '<h2>Notes</h2><div class="card">' + notesHtml +
       '<div class="field"><label class="label" for="sj-note">ADD NOTE</label>' +
@@ -2347,6 +2541,23 @@ Screens['scheduled-job'] = function (param) {
         if (ok) afterMutation(Repository.completeWarehouseWork(w.id), 'Warehouse work completed.');
       });
     };
+    var ro = $('#sj-reopen');
+    if (ro) ro.onclick = function () {
+      var wrap = document.createElement('div');
+      wrap.className = 'modal-wrap';
+      wrap.innerHTML = '<div class="modal" role="dialog" aria-modal="true"><h2>Reopen ' + esc(w.number) + '?</h2>' +
+        '<div class="field"><label class="label">REASON (required)</label>' +
+        '<input class="input" id="reopen-reason" placeholder="Why is this job being reopened?"></div>' +
+        '<button class="btn btn-primary" id="reopen-ok">REOPEN JOB</button> ' +
+        '<button class="btn" id="reopen-cancel">CANCEL</button></div>';
+      document.body.appendChild(wrap);
+      wrap.querySelector('#reopen-cancel').onclick = function () { wrap.remove(); };
+      wrap.querySelector('#reopen-ok').onclick = function () {
+        var reason = wrap.querySelector('#reopen-reason').value;
+        wrap.remove();
+        afterMutation(Repository.reopenWarehouseWork(w.id, reason), 'Job reopened.');
+      };
+    };
     $('#sj-addnote').onclick = function () {
       var t = $('#sj-note').value;
       afterMutation(Repository.addWorkOrderNote(w.id, t), 'Note added.');
@@ -2363,6 +2574,531 @@ Screens['scheduled-job'] = function (param) {
   }};
 };
 
+/* ======================================================================
+   RUN 6: ORDER + SALES ORDER foundation.
+   Commercial layer upstream of warehouse execution:
+     ORDER -> SALES ORDER -> WORK ORDER(S) -> ASSIGN INVENTORY -> ROLL -> CUT
+   Rules:
+   - Orders are drafts (DRAFT -> READY_FOR_REVIEW -> SUBMITTED -> sales order).
+   - No pricing/accounting/payment logic. No duplicate material data:
+     sales-order lines carry the submitted values plus a sourceItemId link.
+   - Submission and line release are idempotent (safe double-tap / retry).
+   - Role policy is centralized in orderPolicy() below.
+   ====================================================================== */
+
+var ORDER_STATUS = { DRAFT: 'DRAFT', READY_FOR_REVIEW: 'READY_FOR_REVIEW', SUBMITTED: 'SUBMITTED', CANCELLED: 'CANCELLED' };
+var SO_STATUS = { OPEN: 'OPEN', PARTIALLY_RELEASED: 'PARTIALLY_RELEASED', RELEASED_TO_WAREHOUSE: 'RELEASED_TO_WAREHOUSE',
+  IN_PROGRESS: 'IN_PROGRESS', COMPLETED: 'COMPLETED', ON_HOLD: 'ON_HOLD', CANCELLED: 'CANCELLED' };
+var ORDER_MATERIAL_TYPES = ['CARPET', 'PLANK', 'PAD', 'OTHER'];
+var ORDER_UOMS = ['LF', 'BOX', 'EA', 'ROLL', 'SY'];
+
+/* Prototype role policy for the order commercial layer. Centralized and
+   configurable — the single place Run 7+ adjusts when rules firm up. */
+function orderPolicy() {
+  var role = (DB.data && DB.data.employeeRoles && DB.data.currentEmployee)
+    ? (DB.data.employeeRoles[DB.data.currentEmployee] || '') : '';
+  var mgr = role === 'MANAGER' || role === 'ADMIN';
+  var sup = mgr || role === 'SUPERVISOR';
+  return {
+    role: role,
+    canCreateOrder: mgr,          /* start / edit drafts, add items */
+    canMarkReady: mgr,            /* DRAFT -> READY_FOR_REVIEW */
+    canSubmitOrder: mgr,          /* -> SALES ORDER (atomic) */
+    canReleaseLine: sup,          /* release eligible warehouse lines */
+    canHoldSalesOrder: mgr,       /* hold / resume */
+    canCancelSalesOrder: mgr,     /* cancel where safe */
+    canReopenWarehouseJob: sup    /* Run 6 §0: reopen completed warehouse job */
+  };
+}
+function orderPolicyRequire(ok, err) {
+  if (!ok) return { ok: false, err: err || 'NOT AUTHORIZED FOR THIS ACTION' };
+  return null;
+}
+
+function nextOrderNumber() { var s = FG().seq || (FG().seq = {}); s.order = s.order || 1002; return 'ORD-' + (s.order++); }
+function nextSalesOrderNumber() { var s = FG().seq || (FG().seq = {}); s.salesOrder = s.salesOrder || 100246; return 'SO-' + (s.salesOrder++); }
+function nextGeneratedWoNumber() { var s = FG().seq || (FG().seq = {}); s.workOrder = s.workOrder || 2001; return 'WO-' + (s.workOrder++); }
+
+function orderById(id) {
+  return ((FG() && FG().orders) || []).filter(function (o) { return o.id === id; })[0] || null;
+}
+function salesOrderById(id) {
+  return ((FG() && FG().salesOrders) || []).filter(function (s) { return s.id === id; })[0] || null;
+}
+function salesOrderByNumber(num) {
+  var n = String(num || '').toUpperCase();
+  return ((FG() && FG().salesOrders) || []).filter(function (s) { return String(s.number || '').toUpperCase() === n; })[0] || null;
+}
+function orderByNumber(num) {
+  var n = String(num || '').toUpperCase();
+  return ((FG() && FG().orders) || []).filter(function (o) { return String(o.number || '').toUpperCase() === n; })[0] || null;
+}
+function orderEditable(o) {
+  return o && (o.status === ORDER_STATUS.DRAFT || o.status === ORDER_STATUS.READY_FOR_REVIEW);
+}
+function orderItemById(o, itemId) {
+  return ((o && o.items) || []).filter(function (i) { return i.id === itemId; })[0] || null;
+}
+function soLineById(so, lineId) {
+  return ((so && so.lines) || []).filter(function (l) { return l.id === lineId; })[0] || null;
+}
+
+/* Append-only audit for the commercial layer. */
+function logOrderEvent(action, o) {
+  o = o || {};
+  FG().orderEvents.push({
+    id: rid('OE'), at: new Date().toISOString(),
+    action: action, user: o.user || (DB.data && DB.data.currentEmployee) || '',
+    warehouse: o.warehouse || (DB.data && DB.data.currentWarehouse) || '',
+    orderId: o.orderId || null, orderNumber: o.orderNumber || null,
+    salesOrderId: o.salesOrderId || null, salesOrderNumber: o.salesOrderNumber || null,
+    workOrderId: o.workOrderId || null, detail: o.detail || ''
+  });
+  DB.save();
+}
+function orderEventsFor(o) {
+  o = o || {};
+  return ((FG() && FG().orderEvents) || []).filter(function (e) {
+    return (o.orderId && e.orderId === o.orderId) || (o.salesOrderId && e.salesOrderId === o.salesOrderId);
+  }).sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
+}
+var ORDER_EVENT_LABELS = {
+  ORDER_CREATED: 'ORDER CREATED', ORDER_HEADER_UPDATED: 'HEADER UPDATED',
+  ORDER_ITEM_ADDED: 'ITEM ADDED', ORDER_ITEM_UPDATED: 'ITEM UPDATED',
+  ORDER_ITEM_REMOVED: 'ITEM REMOVED', ORDER_MARKED_READY: 'MARKED READY FOR REVIEW',
+  ORDER_SUBMITTED: 'ORDER SUBMITTED', SALES_ORDER_CREATED: 'SALES ORDER CREATED',
+  SALES_ORDER_LINE_RELEASED: 'LINE RELEASED TO WAREHOUSE',
+  WORK_ORDER_GENERATED: 'WORK ORDER GENERATED',
+  SALES_ORDER_HELD: 'SALES ORDER ON HOLD', SALES_ORDER_RESUMED: 'SALES ORDER RESUMED',
+  SALES_ORDER_CANCELLED: 'SALES ORDER CANCELLED'
+};
+
+/* ---- Order header ---- */
+function validateOrderHeader(h) {
+  h = h || {};
+  if (!String(h.property || '').trim()) return 'PROPERTY IS REQUIRED';
+  if (h.priority && ['LOW', 'NORMAL', 'HIGH', 'URGENT'].indexOf(h.priority) < 0) return 'INVALID PRIORITY';
+  return null;
+}
+function createOrderLocal(h) {
+  var pol = orderPolicyRequire(orderPolicy().canCreateOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  h = h || {};
+  var err = validateOrderHeader(h);
+  if (err) return { ok: false, err: err };
+  var now = new Date().toISOString();
+  var o = {
+    id: rid('ORD'), number: nextOrderNumber(),
+    property: String(h.property).trim(),
+    account: String(h.account || accountForProperty(h.property) || '').trim(),
+    requestedDate: h.requestedDate || null, scheduledDate: h.scheduledDate || null,
+    priority: h.priority || 'NORMAL',
+    createdBy: DB.data.currentEmployee, warehouseId: DB.data.currentWarehouse,
+    internalRef: String(h.internalRef || '').trim(), notes: String(h.notes || '').trim(),
+    status: ORDER_STATUS.DRAFT, items: [],
+    createdAt: now, updatedAt: now, submittedAt: null, salesOrderId: null
+  };
+  FG().orders.push(o);
+  DB.save();
+  logOrderEvent('ORDER_CREATED', { orderId: o.id, orderNumber: o.number,
+    detail: o.property + (o.account ? ' · ' + o.account : '') });
+  return { ok: true, order: o };
+}
+function updateOrderHeaderLocal(orderId, patch) {
+  var pol = orderPolicyRequire(orderPolicy().canCreateOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var o = orderById(orderId);
+  if (!o) return { ok: false, err: 'ORDER NOT FOUND' };
+  if (!orderEditable(o)) return { ok: false, err: 'ORDER IS NOT EDITABLE' };
+  var merged = { property: o.property, account: o.account, requestedDate: o.requestedDate,
+    scheduledDate: o.scheduledDate, priority: o.priority, internalRef: o.internalRef, notes: o.notes };
+  ['property', 'account', 'requestedDate', 'scheduledDate', 'priority', 'internalRef', 'notes'].forEach(function (k) {
+    if (patch && k in patch) merged[k] = patch[k];
+  });
+  var err = validateOrderHeader(merged);
+  if (err) return { ok: false, err: err };
+  o.property = String(merged.property).trim(); o.account = String(merged.account || '').trim();
+  o.requestedDate = merged.requestedDate || null; o.scheduledDate = merged.scheduledDate || null;
+  o.priority = merged.priority || 'NORMAL';
+  o.internalRef = String(merged.internalRef || '').trim(); o.notes = String(merged.notes || '').trim();
+  o.updatedAt = new Date().toISOString();
+  DB.save();
+  logOrderEvent('ORDER_HEADER_UPDATED', { orderId: o.id, orderNumber: o.number });
+  return { ok: true, order: o };
+}
+
+/* ---- Order items ---- */
+function validateOrderItem(it) {
+  it = it || {};
+  if (!String(it.style || '').trim()) return 'STYLE / PRODUCT IS REQUIRED';
+  if (ORDER_MATERIAL_TYPES.indexOf(it.materialType) < 0) return 'INVALID MATERIAL TYPE';
+  if (ORDER_UOMS.indexOf(it.uom) < 0) return 'INVALID UOM';
+  if (it.uom === 'LF') {
+    var inches = Math.round(Number(it.quantityIn));
+    if (!isFinite(inches) || inches <= 0) return 'CARPET QUANTITY MUST BE A POSITIVE LENGTH';
+  } else {
+    var q = Number(it.quantity);
+    if (!isFinite(q) || q <= 0) return 'QUANTITY MUST BE POSITIVE';
+  }
+  return null;
+}
+function addOrderItemLocal(orderId, it) {
+  var pol = orderPolicyRequire(orderPolicy().canCreateOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var o = orderById(orderId);
+  if (!o) return { ok: false, err: 'ORDER NOT FOUND' };
+  if (!orderEditable(o)) return { ok: false, err: 'ORDER IS NOT EDITABLE' };
+  it = it || {};
+  var err = validateOrderItem(it);
+  if (err) return { ok: false, err: err };
+  var rec = {
+    id: rid('OI'), seq: (o.items || []).length + 1,
+    style: String(it.style).trim(), color: String(it.color || '').trim(),
+    materialType: it.materialType, uom: it.uom,
+    widthIn: it.widthIn != null && it.widthIn !== '' ? Math.round(Number(it.widthIn)) : null,
+    /* ORDER QUANTITY = requested material. Carpet: integer inches.
+       ROLL BALANCE = warehouse inventory — never mixed. */
+    quantityIn: it.uom === 'LF' ? Math.round(Number(it.quantityIn)) : null,
+    quantity: it.uom === 'LF' ? null : Number(it.quantity),
+    notes: String(it.notes || '').trim()
+  };
+  o.items.push(rec);
+  o.updatedAt = new Date().toISOString();
+  DB.save();
+  logOrderEvent('ORDER_ITEM_ADDED', { orderId: o.id, orderNumber: o.number,
+    detail: rec.style + (rec.color ? ' / ' + rec.color : '') + ' · ' + orderItemQtyDisplay(rec) });
+  return { ok: true, order: o, item: rec };
+}
+function updateOrderItemLocal(orderId, itemId, patch) {
+  var pol = orderPolicyRequire(orderPolicy().canCreateOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var o = orderById(orderId);
+  if (!o) return { ok: false, err: 'ORDER NOT FOUND' };
+  if (!orderEditable(o)) return { ok: false, err: 'ORDER IS NOT EDITABLE' };
+  var rec = orderItemById(o, itemId);
+  if (!rec) return { ok: false, err: 'ITEM NOT FOUND' };
+  var merged = { style: rec.style, color: rec.color, materialType: rec.materialType, uom: rec.uom,
+    widthIn: rec.widthIn, quantityIn: rec.quantityIn, quantity: rec.quantity, notes: rec.notes };
+  ['style', 'color', 'materialType', 'uom', 'widthIn', 'quantityIn', 'quantity', 'notes'].forEach(function (k) {
+    if (patch && k in patch) merged[k] = patch[k];
+  });
+  var err = validateOrderItem(merged);
+  if (err) return { ok: false, err: err };
+  rec.style = String(merged.style).trim(); rec.color = String(merged.color || '').trim();
+  rec.materialType = merged.materialType; rec.uom = merged.uom;
+  rec.widthIn = merged.widthIn != null && merged.widthIn !== '' ? Math.round(Number(merged.widthIn)) : null;
+  rec.quantityIn = merged.uom === 'LF' ? Math.round(Number(merged.quantityIn)) : null;
+  rec.quantity = merged.uom === 'LF' ? null : Number(merged.quantity);
+  rec.notes = String(merged.notes || '').trim();
+  o.updatedAt = new Date().toISOString();
+  DB.save();
+  logOrderEvent('ORDER_ITEM_UPDATED', { orderId: o.id, orderNumber: o.number, detail: 'Line ' + rec.seq + ': ' + rec.style });
+  return { ok: true, order: o, item: rec };
+}
+function removeOrderItemLocal(orderId, itemId) {
+  var pol = orderPolicyRequire(orderPolicy().canCreateOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var o = orderById(orderId);
+  if (!o) return { ok: false, err: 'ORDER NOT FOUND' };
+  if (!orderEditable(o)) return { ok: false, err: 'ORDER IS NOT EDITABLE' };
+  var idx = (o.items || []).map(function (i) { return i.id; }).indexOf(itemId);
+  if (idx < 0) return { ok: false, err: 'ITEM NOT FOUND' };
+  var removed = o.items.splice(idx, 1)[0];
+  o.items.forEach(function (i, n) { i.seq = n + 1; });
+  o.updatedAt = new Date().toISOString();
+  DB.save();
+  logOrderEvent('ORDER_ITEM_REMOVED', { orderId: o.id, orderNumber: o.number, detail: 'Line removed: ' + removed.style });
+  return { ok: true, order: o };
+}
+/* Discard a draft order. Only unsubmitted drafts may be discarded — a
+   submitted order has commercial meaning and must be cancelled through
+   its sales order instead. Runs through the repository (never direct
+   FG() mutation from the UI) so shared drafts are deleted server-side. */
+function deleteOrderLocal(id) {
+  var pol = orderPolicyRequire(orderPolicy().canCreateOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var o = orderById(id);
+  if (!o) return { ok: false, err: 'ORDER NOT FOUND' };
+  if (o.status !== ORDER_STATUS.DRAFT && o.status !== ORDER_STATUS.READY_FOR_REVIEW)
+    return { ok: false, err: 'ONLY DRAFTS CAN BE DISCARDED' };
+  FG().orders = (FG().orders || []).filter(function (x) { return x.id !== id; });
+  DB.save();
+  logOrderEvent('ORDER_DISCARDED', { orderId: id, orderNumber: o.number,
+    detail: 'Draft ' + o.number + ' discarded by ' + DB.data.currentEmployee + '.' });
+  return { ok: true };
+}
+function orderItemQtyDisplay(it) {
+  if (!it) return '';
+  /* Order items carry quantityIn/quantity; sales-order lines carry
+     orderedIn/orderedQty/warehouseQtyRequired. Both shapes render. */
+  if (it.uom === 'LF') {
+    var inches = it.quantityIn != null ? it.quantityIn
+      : (it.warehouseQtyRequired != null ? it.warehouseQtyRequired : it.orderedIn);
+    return fmtLen(inches || 0) + ' LF';
+  }
+  var qty = it.quantity != null ? it.quantity
+    : (it.warehouseQtyRequired != null ? it.warehouseQtyRequired : it.orderedQty);
+  return String(qty) + ' ' + it.uom;
+}
+
+/* ---- Draft lists ---- */
+function getDraftOrdersLocal() {
+  return (FG().orders || [])
+    .filter(function (o) { return o.status === ORDER_STATUS.DRAFT || o.status === ORDER_STATUS.READY_FOR_REVIEW; })
+    .sort(function (a, b) { return new Date(b.updatedAt) - new Date(a.updatedAt); });
+}
+function getRecentSubmittedOrdersLocal(limit) {
+  return (FG().orders || [])
+    .filter(function (o) { return o.status === ORDER_STATUS.SUBMITTED; })
+    .sort(function (a, b) { return new Date(b.submittedAt || b.updatedAt) - new Date(a.submittedAt || a.updatedAt); })
+    .slice(0, limit || 5);
+}
+
+/* ---- Review -> submit ---- */
+function markOrderReadyLocal(orderId) {
+  var pol = orderPolicyRequire(orderPolicy().canMarkReady, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var o = orderById(orderId);
+  if (!o) return { ok: false, err: 'ORDER NOT FOUND' };
+  if (o.status !== ORDER_STATUS.DRAFT) return { ok: false, err: 'ORDER IS NOT A DRAFT' };
+  if (!(o.items || []).length) return { ok: false, err: 'ADD AT LEAST ONE ITEM' };
+  o.status = ORDER_STATUS.READY_FOR_REVIEW;
+  o.updatedAt = new Date().toISOString();
+  DB.save();
+  logOrderEvent('ORDER_MARKED_READY', { orderId: o.id, orderNumber: o.number });
+  return { ok: true, order: o };
+}
+
+/* Atomic submit: DRAFT/REVIEW -> SALES ORDER + lines in one step.
+   Idempotent: a retry on an already-submitted order returns the existing
+   sales order (duplicate:true) instead of creating a second one. */
+function submitOrderLocal(orderId) {
+  var pol = orderPolicyRequire(orderPolicy().canSubmitOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var o = orderById(orderId);
+  if (!o) return { ok: false, err: 'ORDER NOT FOUND' };
+  if (o.status === ORDER_STATUS.SUBMITTED && o.salesOrderId) {
+    var existing = salesOrderById(o.salesOrderId);
+    if (existing) return { ok: true, salesOrder: existing, order: o, duplicate: true };
+  }
+  if (!orderEditable(o)) return { ok: false, err: 'ORDER IS NOT SUBMITTABLE' };
+  if (!(o.items || []).length) return { ok: false, err: 'ADD AT LEAST ONE ITEM' };
+  var now = new Date().toISOString();
+  /* Build the full sales-order record first; only commit when every line
+     validates — no partial sales order is ever persisted. */
+  var lines = [];
+  for (var i = 0; i < o.items.length; i++) {
+    var it = o.items[i];
+    var err = validateOrderItem(it);
+    if (err) return { ok: false, err: 'LINE ' + it.seq + ': ' + err };
+    lines.push({
+      id: rid('SOL'), seq: it.seq, sourceItemId: it.id,
+      style: it.style, color: it.color, materialType: it.materialType, uom: it.uom,
+      widthIn: it.widthIn,
+      orderedIn: it.quantityIn, orderedQty: it.quantity,
+      warehouseQtyRequired: it.quantityIn != null ? it.quantityIn : it.quantity,
+      status: 'OPEN', workOrderId: null
+    });
+  }
+  var so = {
+    id: rid('SO'), number: nextSalesOrderNumber(), sourceOrderId: o.id,
+    property: o.property, account: o.account, warehouseId: o.warehouseId,
+    priority: o.priority, requestedDate: o.requestedDate, scheduledDate: o.scheduledDate,
+    status: SO_STATUS.OPEN, createdBy: o.createdBy, submittedBy: DB.data.currentEmployee,
+    createdAt: now, submittedAt: now, updatedAt: now, notes: o.notes,
+    onHold: false, holdReason: null, holdAt: null, holdBy: null,
+    lines: lines
+  };
+  FG().salesOrders.push(so);
+  o.status = ORDER_STATUS.SUBMITTED; o.submittedAt = now; o.updatedAt = now; o.salesOrderId = so.id;
+  DB.save();
+  logOrderEvent('ORDER_SUBMITTED', { orderId: o.id, orderNumber: o.number,
+    salesOrderId: so.id, salesOrderNumber: so.number, detail: 'Converted to sales order.' });
+  logOrderEvent('SALES_ORDER_CREATED', { orderId: o.id, orderNumber: o.number,
+    salesOrderId: so.id, salesOrderNumber: so.number,
+    detail: lines.length + ' material line(s).' });
+  return { ok: true, salesOrder: so, order: o };
+}
+
+/* ---- Sales order reads ---- */
+/* Warehouse status derives from released lines + generated work orders —
+   never maintained by hand where derivation is reliable. */
+function salesOrderWarehouseStatus(so) {
+  if (!so) return '';
+  if (so.status === SO_STATUS.ON_HOLD) return SO_STATUS.ON_HOLD;
+  if (so.status === SO_STATUS.CANCELLED) return SO_STATUS.CANCELLED;
+  var lines = so.lines || [];
+  var released = lines.filter(function (l) { return l.status === 'RELEASED'; });
+  if (!released.length) return SO_STATUS.OPEN;
+  var wos = released.map(function (l) { return l.workOrderId && woById(l.workOrderId); })
+    .filter(Boolean);
+  if (wos.length && wos.every(function (w) { return w.opStatus === 'COMPLETE'; }) && wos.length === released.length)
+    return SO_STATUS.COMPLETED;
+  if (wos.some(function (w) { return w.opStatus === 'IN_PROGRESS'; })) return SO_STATUS.IN_PROGRESS;
+  if (released.length < lines.length) return SO_STATUS.PARTIALLY_RELEASED;
+  return SO_STATUS.RELEASED_TO_WAREHOUSE;
+}
+function getSalesOrdersLocal() {
+  return (FG().salesOrders || [])
+    .slice().sort(function (a, b) { return new Date(b.updatedAt) - new Date(a.updatedAt); });
+}
+function salesOrdersByTab(tab) {
+  var all = getSalesOrdersLocal();
+  return all.filter(function (so) {
+    var st = salesOrderWarehouseStatus(so);
+    if (tab === 'OPEN') return st === SO_STATUS.OPEN || st === SO_STATUS.PARTIALLY_RELEASED;
+    if (tab === 'RELEASED') return st === SO_STATUS.RELEASED_TO_WAREHOUSE;
+    if (tab === 'IN_PROGRESS') return st === SO_STATUS.IN_PROGRESS;
+    if (tab === 'COMPLETED') return st === SO_STATUS.COMPLETED;
+    if (tab === 'ON_HOLD') return st === SO_STATUS.ON_HOLD;
+    return true;
+  });
+}
+
+/* ---- Release to warehouse ----
+   One eligible sales-order material line -> one work order (Run 6 rule;
+   generation logic is isolated here so company grouping rules can change).
+   Idempotent: a released line returns its existing work order. */
+function buildWorkOrderFromLine(so, line) {
+  var isCount = line.uom !== 'LF';
+  var now = new Date().toISOString();
+  return {
+    id: rid('WO'), number: nextGeneratedWoNumber(),
+    property: so.property, account: so.account,
+    opStatus: 'OPEN', assignmentStatus: 'UNASSIGNED', assigneeId: null,
+    scheduledDate: so.scheduledDate || so.requestedDate || null, scheduledTime: null,
+    priority: so.priority || 'NORMAL',
+    onHold: false, holdReason: null, holdAt: null, holdBy: null,
+    warehouseCompletedAt: null, warehouseCompletedBy: null,
+    salesOrderId: so.id, salesOrderLineId: line.id,
+    notes: 'Generated from ' + so.number + ' line ' + line.seq + '.',
+    createdAt: now,
+    lines: [{
+      id: rid('WOL'), style: line.style, color: line.color,
+      materialType: line.materialType, uom: line.uom, widthIn: line.widthIn,
+      requiredIn: isCount ? 0 : (line.warehouseQtyRequired || 0),
+      requiredCount: isCount ? line.warehouseQtyRequired : null
+    }]
+  };
+}
+function generateWorkOrderFromLine(so, line) {
+  var wo = buildWorkOrderFromLine(so, line);
+  FG().workOrders.push(wo);
+  return wo;
+}
+function releaseSalesOrderLineLocal(soId, lineId) {
+  var pol = orderPolicyRequire(orderPolicy().canReleaseLine, 'SUPERVISOR ROLE REQUIRED');
+  if (pol) return pol;
+  var so = salesOrderById(soId);
+  if (!so) return { ok: false, err: 'SALES ORDER NOT FOUND' };
+  if (so.onHold || so.status === SO_STATUS.ON_HOLD) return { ok: false, err: 'SALES ORDER IS ON HOLD' };
+  if (so.status === SO_STATUS.CANCELLED) return { ok: false, err: 'SALES ORDER IS CANCELLED' };
+  var line = soLineById(so, lineId);
+  if (!line) return { ok: false, err: 'LINE NOT FOUND' };
+  if (line.status === 'RELEASED') {
+    var existing = line.workOrderId && woById(line.workOrderId);
+    if (existing) return { ok: true, workOrder: existing, salesOrder: so, duplicate: true };
+    /* Released flag without a work order (should not happen) — regenerate. */
+  }
+  var wo = generateWorkOrderFromLine(so, line);
+  line.status = 'RELEASED'; line.workOrderId = wo.id;
+  /* Run 6 §14/§16: partial line release — SO status tracks line states. */
+  var allRel = (so.lines || []).every(function (l) { return l.status === 'RELEASED'; });
+  so.status = allRel ? SO_STATUS.RELEASED_TO_WAREHOUSE : SO_STATUS.PARTIALLY_RELEASED;
+  so.updatedAt = new Date().toISOString();
+  DB.save();
+  logOrderEvent('SALES_ORDER_LINE_RELEASED', { salesOrderId: so.id, salesOrderNumber: so.number,
+    workOrderId: wo.id, detail: 'Line ' + line.seq + ' released to warehouse.' });
+  logOrderEvent('WORK_ORDER_GENERATED', { salesOrderId: so.id, salesOrderNumber: so.number,
+    workOrderId: wo.id, detail: wo.number + ' generated from line ' + line.seq + '.' });
+  return { ok: true, workOrder: wo, salesOrder: so };
+}
+
+/* ---- Hold / resume / cancel (sales order) ---- */
+function holdSalesOrderLocal(soId, reason) {
+  var pol = orderPolicyRequire(orderPolicy().canHoldSalesOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var so = salesOrderById(soId);
+  if (!so) return { ok: false, err: 'SALES ORDER NOT FOUND' };
+  reason = String(reason || '').trim();
+  if (!reason) return { ok: false, err: 'REASON REQUIRED' };
+  if (so.onHold) return { ok: false, err: 'ALREADY ON HOLD' };
+  if (so.status === SO_STATUS.CANCELLED) return { ok: false, err: 'SALES ORDER IS CANCELLED' };
+  so.onHold = true; so.holdReason = reason; so.holdAt = new Date().toISOString();
+  so.holdBy = DB.data.currentEmployee; so.status = SO_STATUS.ON_HOLD;
+  so.updatedAt = so.holdAt;
+  DB.save();
+  logOrderEvent('SALES_ORDER_HELD', { salesOrderId: so.id, salesOrderNumber: so.number, detail: reason });
+  return { ok: true, salesOrder: so };
+}
+function resumeSalesOrderLocal(soId) {
+  var pol = orderPolicyRequire(orderPolicy().canHoldSalesOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var so = salesOrderById(soId);
+  if (!so) return { ok: false, err: 'SALES ORDER NOT FOUND' };
+  if (!so.onHold) return { ok: false, err: 'NOT ON HOLD' };
+  so.onHold = false; so.holdReason = null; so.holdAt = null; so.holdBy = null;
+  so.status = SO_STATUS.OPEN;
+  so.updatedAt = new Date().toISOString();
+  DB.save();
+  logOrderEvent('SALES_ORDER_RESUMED', { salesOrderId: so.id, salesOrderNumber: so.number });
+  return { ok: true, salesOrder: so };
+}
+/* Cancellation never silently erases warehouse work: if work orders already
+   exist the caller must pass { force: true } after seeing the warning. Cuts
+   are never undone. */
+function cancelSalesOrderLocal(soId, reason, opts) {
+  var pol = orderPolicyRequire(orderPolicy().canCancelSalesOrder, 'MANAGER ROLE REQUIRED');
+  if (pol) return pol;
+  var so = salesOrderById(soId);
+  if (!so) return { ok: false, err: 'SALES ORDER NOT FOUND' };
+  reason = String(reason || '').trim();
+  if (!reason) return { ok: false, err: 'REASON REQUIRED' };
+  if (so.status === SO_STATUS.CANCELLED) return { ok: false, err: 'ALREADY CANCELLED' };
+  var wos = (so.lines || []).map(function (l) { return l.workOrderId && woById(l.workOrderId); }).filter(Boolean);
+  if (wos.length && !(opts && opts.force))
+    return { ok: false, err: 'WAREHOUSE WORK EXISTS', needsConfirmation: true,
+      workOrders: wos.map(function (w) { return w.number; }) };
+  so.status = SO_STATUS.CANCELLED; so.onHold = false;
+  so.updatedAt = new Date().toISOString();
+  DB.save();
+  logOrderEvent('SALES_ORDER_CANCELLED', { salesOrderId: so.id, salesOrderNumber: so.number,
+    detail: reason + (wos.length ? ' (' + wos.length + ' work order(s) already existed — preserved).' : '') });
+  return { ok: true, salesOrder: so };
+}
+
+/* ---- Property / account directory ----
+   Reuses shared Property / Account entities — no duplicate records per
+   order. Built from existing work orders, orders, and sales orders plus a
+   small known-property seed list, so the selector can later connect with
+   the Near Me / Account modules. */
+function propertyDirectory() {
+  var seen = {}, out = [];
+  function add(property, account) {
+    var p = String(property || '').trim();
+    if (!p) return;
+    var k = (p + '|' + String(account || '').trim()).toUpperCase();
+    if (seen[k]) return;
+    seen[k] = true;
+    out.push({ property: p, account: String(account || '').trim() });
+  }
+  [['Ventura Pointe', 'Willowbridge'], ['Harbor Ridge', 'Seaside Homes'],
+   ['Maple St Residence', 'Acme Flooring Co'], ['Oak Ave Residence', 'Acme Flooring Co'],
+   ['Pine Rd Residence', 'HomeStyle Interiors'], ['Cedar Ln Residence', 'Acme Flooring Co']].forEach(function (x) { add(x[0], x[1]); });
+  (FG().workOrders || []).forEach(function (w) { add(w.property, w.account); });
+  (FG().orders || []).forEach(function (o) { add(o.property, o.account); });
+  (FG().salesOrders || []).forEach(function (s) { add(s.property, s.account); });
+  out.sort(function (a, b) { return a.property < b.property ? -1 : 1; });
+  return out;
+}
+/* Account auto-fill for the order header: exact property match wins. */
+function accountForProperty(property) {
+  var p = String(property || '').trim().toLowerCase();
+  if (!p) return '';
+  var hit = propertyDirectory().filter(function (d) { return d.property.toLowerCase() === p; })[0];
+  return hit ? hit.account : '';
+}
+
 function aiEventLabel(action) {
   var map = { INVENTORY_ASSIGNED: 'INVENTORY ASSIGNED', INVENTORY_RELEASED: 'INVENTORY RELEASED',
     ROLL_VERIFIED: 'ROLL VERIFIED', LOCATION_VERIFIED: 'LOCATION VERIFIED',
@@ -2372,6 +3108,7 @@ function aiEventLabel(action) {
     JOB_HELD: 'JOB PLACED ON HOLD', JOB_RESUMED: 'JOB RESUMED',
     WAREHOUSE_WORK_STARTED: 'WAREHOUSE WORK STARTED',
     WAREHOUSE_WORK_COMPLETED: 'WAREHOUSE WORK COMPLETED',
+    WAREHOUSE_WORK_REOPENED: 'WAREHOUSE JOB REOPENED',
     WORK_ORDER_NOTE_ADDED: 'NOTE', EMPLOYEE_ASSIGNED: 'EMPLOYEE ASSIGNED' };
   return map[action] || action;
 }
@@ -2390,6 +3127,701 @@ function aiMatches(wo, q) {
   return hay.indexOf(q.toUpperCase()) !== -1;
 }
 
+/* ======================================================================
+   RUN 6 screens: Order wizard (order/new, order/edit) + Sales Orders.
+   Overrides the MODULE_INFO placeholders registered at the generic loop
+   above — this block is intentionally placed after it.
+   ====================================================================== */
+
+/* Transient wizard state: resets whenever a different order is opened. */
+var OWIZ = { orderId: null, step: 1, editItem: null };
+
+/* ---------- shared Run 6 presentation bits ---------- */
+function fmtD(ds) {
+  if (!ds) return '—';
+  var p = ds.split('-');
+  var M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var m = Number(p[1]);
+  return (M[m - 1] || p[1]) + ' ' + Number(p[2]);
+}
+function orderStatusChip(st) {
+  var map = { DRAFT: 'chip', READY_FOR_REVIEW: 'chip chip-blue', SUBMITTED: 'chip chip-green' };
+  return '<span class="' + (map[st] || 'chip') + '">' + esc(String(st || '').replace(/_/g, ' ')) + '</span>';
+}
+function soStatusChip(st) {
+  var map = { OPEN: 'chip chip-blue', ON_HOLD: 'chip chip-amber', CANCELLED: 'chip chip-red',
+    PARTIALLY_RELEASED: 'chip chip-amber', RELEASED: 'chip chip-green', CLOSED: 'chip chip-gray' };
+  return '<span class="' + (map[st] || 'chip') + '">' + esc(String(st || '').replace(/_/g, ' ')) + '</span>';
+}
+function soLineChip(st) {
+  var map = { OPEN: 'chip', RELEASED: 'chip chip-green' };
+  return '<span class="' + (map[st] || 'chip') + '">' + esc(st || '') + '</span>';
+}
+function orderStepsHtml(step) {
+  var steps = ['HEADER', 'ITEMS', 'REVIEW'];
+  return '<div class="osteps">' + steps.map(function (s, i) {
+    var n = i + 1;
+    var cls = n === step ? 'os-cur' : (n < step ? 'os-done' : 'os-todo');
+    return '<div class="ostep ' + cls + '"><span class="osn">' + n + '</span><span class="osl">' + s + '</span></div>';
+  }).join('') + '</div>';
+}
+function orderLineSummary(it) {
+  var parts = [it.style, it.color].filter(function (x) { return x; }).join(' / ');
+  var qty = (typeof orderItemQtyDisplay === 'function') ? orderItemQtyDisplay(it) : '';
+  return parts + ' · ' + (it.materialType || '') + ' · ' + (it.uom || '') + ' · ' +
+    (typeof fmtWidth === 'function' ? fmtWidth(it.widthIn) : (it.widthIn || '')) + ' · ' + qty;
+}
+function soMaterialSummary(so) {
+  var lines = so.lines || [];
+  return lines.length + ' MATERIAL LINE' + (lines.length === 1 ? '' : 'S');
+}
+function soWarehouseChip(so) {
+  var released = (so.lines || []).filter(function (l) { return l.status === 'RELEASED'; }).length;
+  var n = (so.lines || []).length;
+  var t = released + ' OF ' + n + ' LINES RELEASED';
+  var cls = released === 0 ? 'chip' : (released < n ? 'chip chip-amber' : 'chip chip-green');
+  return '<span class="' + cls + '">' + t + '</span>';
+}
+/* Header form shared by order/new and order/edit step 1. */
+function orderHeaderFormHtml(o) {
+  var dir = propertyDirectory();
+  var opts = dir.map(function (d) {
+    return '<option value="' + esc(d.property) + '">' + esc(d.property) + ' (' + esc(d.account) + ')</option>';
+  }).join('');
+  return '<div class="card">' +
+    '<div class="field"><label class="label" for="oh-prop">PROPERTY *</label>' +
+    '<input class="input" id="oh-prop" list="oh-props" value="' + esc(o ? o.property : '') + '" autocomplete="off" placeholder="Start typing a property…">' +
+    '<datalist id="oh-props">' + opts + '</datalist></div>' +
+    '<div class="field"><label class="label" for="oh-acct">ACCOUNT</label>' +
+    '<input class="input" id="oh-acct" value="' + esc(o ? o.account : '') + '" autocomplete="off" placeholder="Auto-fills from the property directory"></div>' +
+    '<div class="btn-row">' +
+    '<div class="field" style="flex:1"><label class="label" for="oh-req">REQUESTED DATE</label>' +
+    '<input class="input" type="date" id="oh-req" value="' + esc((o && o.requestedDate) || '') + '"></div>' +
+    '<div class="field" style="flex:1"><label class="label" for="oh-sched">SCHEDULED DATE</label>' +
+    '<input class="input" type="date" id="oh-sched" value="' + esc((o && o.scheduledDate) || '') + '"></div>' +
+    '</div>' +
+    '<div class="field"><label class="label" for="oh-prio">PRIORITY</label>' +
+    '<select class="input" id="oh-prio">' + ['NORMAL', 'HIGH', 'URGENT'].map(function (p) {
+      return '<option value="' + p + '"' + (o && o.priority === p ? ' selected' : '') + '>' + p + '</option>';
+    }).join('') + '</select></div>' +
+    '<div class="field"><label class="label" for="oh-ref">INTERNAL REF</label>' +
+    '<input class="input" id="oh-ref" value="' + esc(o ? o.internalRef : '') + '" placeholder="Optional" autocomplete="off"></div>' +
+    '<div class="field"><label class="label" for="oh-notes">NOTES</label>' +
+    '<textarea class="input" id="oh-notes" rows="2">' + esc(o ? o.notes : '') + '</textarea></div>' +
+    '<div class="err" id="oh-err" hidden></div>' +
+    '</div>';
+}
+function readOrderHeaderForm() {
+  return {
+    property: $('#oh-prop').value, account: $('#oh-acct').value,
+    requestedDate: $('#oh-req').value || null, scheduledDate: $('#oh-sched').value || null,
+    priority: $('#oh-prio').value, internalRef: $('#oh-ref').value, notes: $('#oh-notes').value
+  };
+}
+function mountPropertyAutofill() {
+  var dir = propertyDirectory();
+  var prop = $('#oh-prop');
+  if (!prop) return;
+  prop.addEventListener('input', function () {
+    var hit = dir.filter(function (d) { return d.property.toLowerCase() === prop.value.trim().toLowerCase(); })[0];
+    if (hit) $('#oh-acct').value = hit.account;
+  });
+}
+/* Item form shared by add + edit on the Items step. */
+function orderItemFormHtml(it) {
+  var types = ['CARPET', 'PAD', 'RESILIENT', 'TILE', 'WOOD', 'OTHER'];
+  var uoms = ['LF', 'ROLL', 'BOX', 'EA'];
+  it = it || {};
+  return '<div class="card">' +
+    '<div class="field"><label class="label" for="oi-style">STYLE *</label>' +
+    '<input class="input" id="oi-style" value="' + esc(it.style || '') + '" autocomplete="off" placeholder="e.g. Marvel"></div>' +
+    '<div class="field"><label class="label" for="oi-color">COLOR</label>' +
+    '<input class="input" id="oi-color" value="' + esc(it.color || '') + '" autocomplete="off" placeholder="e.g. Chrome"></div>' +
+    '<div class="btn-row">' +
+    '<div class="field" style="flex:1"><label class="label" for="oi-type">MATERIAL TYPE</label>' +
+    '<select class="input" id="oi-type">' + types.map(function (t) {
+      return '<option value="' + t + '"' + (it.materialType === t ? ' selected' : '') + '>' + t + '</option>';
+    }).join('') + '</select></div>' +
+    '<div class="field" style="flex:1"><label class="label" for="oi-uom">UOM</label>' +
+    '<select class="input" id="oi-uom">' + uoms.map(function (u) {
+      return '<option value="' + u + '"' + (it.uom === u ? ' selected' : '') + '>' + u + '</option>';
+    }).join('') + '</select></div>' +
+    '</div>' +
+    '<div class="field"><label class="label" for="oi-width">WIDTH (inches)</label>' +
+    '<input class="input num" id="oi-width" inputmode="decimal" value="' + esc(it.widthIn != null ? it.widthIn : '') + '" placeholder="e.g. 144"></div>' +
+    '<div id="oi-qtywrap">' + orderItemQtyInputsHtml(it) + '</div>' +
+    '<div class="field"><label class="label" for="oi-notes">NOTES</label>' +
+    '<input class="input" id="oi-notes" value="' + esc(it.notes || '') + '" autocomplete="off"></div>' +
+    '<div class="err" id="oi-err" hidden></div>' +
+    '<div class="btn-row">' +
+    '<button class="btn btn-primary" id="oi-save" style="flex:1">' + (it.id ? 'SAVE ITEM' : 'ADD ITEM') + '</button>' +
+    '<button class="btn" id="oi-cancel" style="flex:1">CANCEL</button>' +
+    '</div></div>';
+}
+function orderItemQtyInputsHtml(it) {
+  var uom = it.uom || $('#oi-uom') && $('#oi-uom').value || 'LF';
+  if (uom === 'LF') {
+    var total = it.quantityIn || 0;
+    var ft = Math.floor(total / 12), inch = total % 12;
+    return '<div class="btn-row">' +
+      '<div class="field" style="flex:1"><label class="label" for="oi-ft">QUANTITY — FEET *</label>' +
+      '<input class="input num" id="oi-ft" inputmode="numeric" value="' + ft + '"></div>' +
+      '<div class="field" style="flex:1"><label class="label" for="oi-in">QUANTITY — INCHES</label>' +
+      '<input class="input num" id="oi-in" inputmode="numeric" value="' + inch + '"></div>' +
+      '</div>';
+  }
+  return '<div class="field"><label class="label" for="oi-qty">QUANTITY *</label>' +
+    '<input class="input num" id="oi-qty" inputmode="decimal" value="' + esc(it.quantity != null ? it.quantity : '') + '" placeholder="e.g. 12"></div>';
+}
+function readOrderItemForm() {
+  var uom = $('#oi-uom').value;
+  var rec = {
+    style: $('#oi-style').value, color: $('#oi-color').value,
+    materialType: $('#oi-type').value, uom: uom,
+    widthIn: $('#oi-width').value === '' ? null : Number($('#oi-width').value),
+    notes: $('#oi-notes').value
+  };
+  if (uom === 'LF') {
+    var ft = Number($('#oi-ft').value || 0), inch = Number($('#oi-in').value || 0);
+    rec.quantityIn = ft * 12 + inch; rec.quantity = null;
+  } else {
+    rec.quantityIn = null;
+    rec.quantity = $('#oi-qty').value === '' ? null : Number($('#oi-qty').value);
+  }
+  return rec;
+}
+
+/* ======================================================================
+   ORDER HOME — /order
+   ====================================================================== */
+Screens['order'] = function () {
+  var pol = orderPolicy();
+  var drafts = getDraftOrdersLocal();
+  var recent = getRecentSubmittedOrdersLocal(5);
+  function draftCard(o) {
+    return '<button class="ocard" data-id="' + esc(o.id) + '">' +
+      '<span class="oc-num mono">' + esc(o.number) + '</span>' +
+      '<span class="oc-prop">' + esc(o.property || '—') + '</span>' +
+      '<span class="oc-meta">' + (o.items || []).length + ' item' + ((o.items || []).length === 1 ? '' : 's') +
+      ' · ' + fmtD(o.requestedDate) + '</span>' +
+      orderStatusChip(o.status) + '</button>';
+  }
+  var html =
+    '<div class="screen">' +
+    '<div class="step-head">ORDER</div><h1>Order</h1>' +
+    (pol.canCreateOrder
+      ? '<button class="btn btn-primary" id="ord-new">+ START ORDER</button>'
+      : '<p class="hint">Manager role required to create or submit orders.</p>') +
+    '<div class="field"><label class="label" for="ord-q">FIND AN ORDER</label>' +
+    '<input class="input mono" id="ord-q" autocomplete="off" placeholder="Order or sales order #"></div>' +
+    '<div class="sect">DRAFT ORDERS (' + drafts.length + ')</div>' +
+    (drafts.length ? '<div class="ocards">' + drafts.map(draftCard).join('') + '</div>'
+      : '<p class="hint">No drafts.</p>') +
+    '<div class="sect">RECENTLY SUBMITTED</div>' +
+    (recent.length ? '<div class="ocards">' + recent.map(function (o) {
+      return '<button class="ocard" data-so="' + esc(o.salesOrderId || '') + '">' +
+        '<span class="oc-num mono">' + esc(o.number) + '</span>' +
+        '<span class="oc-prop">' + esc(o.property || '—') + '</span>' +
+        '<span class="oc-meta">SUBMITTED ' + fmtD(o.submittedAt ? o.submittedAt.slice(0, 10) : null) + '</span>' +
+        orderStatusChip(o.status) + '</button>';
+    }).join('') + '</div>' : '<p class="hint">None yet.</p>') +
+    '</div>';
+  return { html: html, mount: function () {
+    var n = $('#ord-new');
+    if (n) n.onclick = function () { go('order/new'); };
+    function bindCards() {
+      Array.prototype.forEach.call(document.querySelectorAll('.ocard[data-id]'), function (b) {
+        b.onclick = function () { go('order/edit', b.getAttribute('data-id')); };
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('.ocard[data-so]'), function (b) {
+        b.onclick = function () { go('sales-order', b.getAttribute('data-so')); };
+      });
+    }
+    bindCards();
+    var q = $('#ord-q');
+    q.addEventListener('input', function () {
+      var needle = q.value.trim().toLowerCase();
+      Array.prototype.forEach.call(document.querySelectorAll('.ocards .ocard'), function (b) {
+        var txt = (b.querySelector('.oc-num').textContent + ' ' + b.querySelector('.oc-prop').textContent).toLowerCase();
+        b.style.display = (!needle || txt.indexOf(needle) >= 0) ? '' : 'none';
+      });
+    });
+  } };
+};
+
+/* ======================================================================
+   ORDER/NEW — step 1 (header) for a brand-new order.
+   ====================================================================== */
+/* Run 6 UI plumbing: local mode resolves {ok:false,err}; shared mode
+   throws. Normalize both into onErr so denied/offline actions always
+   show a message instead of crashing on a missing payload. */
+function run6Call(p, onOk, onErr) {
+  return p.then(function (res) {
+    if (!res || res.ok === false) {
+      onErr({ code: 'LOCAL_ERROR', message: (res && res.err) || 'Action failed.' });
+      return;
+    }
+    onOk(res);
+  }).catch(onErr);
+}
+Screens['order/new'] = function () {
+  var pol = orderPolicy();
+  if (!pol.canCreateOrder)
+    return { html: '<div class="screen">' + pageHead('New order', 'Order') +
+      '<div class="card"><p class="hint">Manager role required to create orders.</p></div></div>' };
+  return {
+    html: '<div class="screen">' +
+      '<button class="backbtn" id="back">← ORDERS</button>' +
+      '<div class="step-head">NEW ORDER</div><h1>Step 1 of 3 — Header</h1>' +
+      orderStepsHtml(1) + orderHeaderFormHtml(null) +
+      '<button class="btn btn-primary" id="oh-save">SAVE & CONTINUE TO ITEMS →</button>' +
+      '</div>',
+    mount: function () {
+      $('#back').onclick = function () { go('order'); };
+      mountPropertyAutofill();
+      $('#oh-save').onclick = function () {
+        var form = readOrderHeaderForm();
+        var err = validateOrderHeader(form);
+        var box = $('#oh-err');
+        if (err) { box.textContent = err; box.hidden = false; bad(); return; }
+        run6Call(Repository.createOrder(form), function (res) {
+          good(); toast('Order ' + res.order.number + ' created.');
+          OWIZ.orderId = res.order.id; OWIZ.step = 2; OWIZ.editItem = null;
+          go('order/edit', res.order.id);
+        }, function (e) {
+          bad();
+          box.textContent = (e && e.code === 'OFFLINE')
+            ? 'OFFLINE — order not created. It will not be sent until you are back online.'
+            : ((e && e.message) || 'Could not create order.');
+          box.hidden = false;
+        });
+      };
+    }
+  };
+};
+
+/* ======================================================================
+   ORDER/EDIT — the three-step wizard for an existing order.
+   ====================================================================== */
+Screens['order/edit'] = function (param) {
+  var o = param && orderById(param);
+  if (!o) { setTimeout(function () { go('order'); }, 0); return { html: '' }; }
+  if (OWIZ.orderId !== o.id) { OWIZ.orderId = o.id; OWIZ.step = 1; OWIZ.editItem = null; }
+  var pol = orderPolicy();
+  var editable = pol.canCreateOrder && orderEditable(o);
+  var step = OWIZ.step;
+
+  function head(title) {
+    return '<button class="backbtn" id="back">← ORDERS</button>' +
+      '<div class="step-head">ORDER <span class="mono">' + esc(o.number) + '</span></div>' +
+      '<h1>' + title + '</h1>' + orderStepsHtml(step);
+  }
+
+  /* ---- step 1: header ---- */
+  function step1() {
+    return {
+      html: '<div class="screen">' + head('Step 1 of 3 — Header') +
+        orderHeaderFormHtml(o) +
+        '<div class="btn-row">' +
+        '<button class="btn btn-primary" id="oh-save" style="flex:1">SAVE & CONTINUE TO ITEMS →</button>' +
+        '</div>' +
+        (o.status === 'DRAFT' && editable
+          ? '<button class="btn btn-danger" id="oh-del">DISCARD DRAFT</button>' : '') +
+        '</div>',
+      mount: function () {
+        $('#back').onclick = function () { go('order'); };
+        mountPropertyAutofill();
+        var save = $('#oh-save');
+        if (save) save.onclick = function () {
+          var form = readOrderHeaderForm();
+          var err = validateOrderHeader(form);
+          var box = $('#oh-err');
+          if (err) { box.textContent = err; box.hidden = false; bad(); return; }
+          run6Call(Repository.updateOrderHeader(o.id, form), function () {
+            good(); toast('Header saved.');
+            OWIZ.step = 2; render();
+          }, function (e) {
+            bad(); box.textContent = (e && e.message) || 'Could not save header.'; box.hidden = false;
+          });
+        };
+        var del = $('#oh-del');
+        if (del) del.onclick = function () {
+          if (!confirm('Discard draft ' + o.number + '?')) return;
+          run6Call(Repository.deleteOrder(o.id), function () {
+            good(); toast('Draft discarded.'); go('order');
+          }, function (e) { bad(); toast((e && e.message) || 'Could not discard draft.'); });
+        };
+      }
+    };
+  }
+
+  /* ---- step 2: items ---- */
+  function step2() {
+    var items = o.items || [];
+    var listHtml = items.length
+      ? items.map(function (it) {
+          return '<div class="ocard" style="cursor:default">' +
+            '<span class="oc-num">LINE ' + it.seq + '</span>' +
+            '<span class="oc-prop">' + esc(orderLineSummary(it)) + '</span>' +
+            (editable ? '<span class="oc-meta"><button class="btn btn-sm" data-edit="' + esc(it.id) + '">EDIT</button> ' +
+              '<button class="btn btn-sm" data-del="' + esc(it.id) + '">REMOVE</button></span>' : '') +
+            '</div>';
+        }).join('')
+      : '<p class="hint">No items yet — add the first material below.</p>';
+    var formHtml = '';
+    if (editable) {
+      if (OWIZ.editItem) {
+        var cur = orderItemById(o, OWIZ.editItem) || (OWIZ.editItem === 'new' ? null : null);
+        formHtml = '<div class="sect">' + (OWIZ.editItem === 'new' ? 'ADD ITEM' : 'EDIT ITEM') + '</div>' +
+          orderItemFormHtml(OWIZ.editItem === 'new' ? null : cur);
+      } else {
+        formHtml = '<button class="btn" id="oi-add">+ ADD ITEM</button>';
+      }
+    }
+    return {
+      html: '<div class="screen">' + head('Step 2 of 3 — Items') +
+        '<div class="ocards">' + listHtml + '</div>' + formHtml +
+        '<div class="btn-row" style="margin-top:12px">' +
+        '<button class="btn" id="oi-back" style="flex:1">← BACK TO HEADER</button>' +
+        '<button class="btn btn-primary" id="oi-next" style="flex:1">CONTINUE TO REVIEW →</button>' +
+        '</div></div>',
+      mount: function () {
+        $('#back').onclick = function () { go('order'); };
+        $('#oi-back').onclick = function () { OWIZ.step = 1; OWIZ.editItem = null; render(); };
+        $('#oi-next').onclick = function () {
+          if (!(o.items || []).length) { bad(); toast('Add at least one item first.'); return; }
+          OWIZ.step = 3; OWIZ.editItem = null; render();
+        };
+        var add = $('#oi-add');
+        if (add) add.onclick = function () { OWIZ.editItem = 'new'; render(); };
+        Array.prototype.forEach.call(document.querySelectorAll('[data-edit]'), function (b) {
+          b.onclick = function () { OWIZ.editItem = b.getAttribute('data-edit'); render(); };
+        });
+        Array.prototype.forEach.call(document.querySelectorAll('[data-del]'), function (b) {
+          b.onclick = function () {
+            if (!confirm('Remove this item?')) return;
+            run6Call(Repository.removeOrderItem(o.id, b.getAttribute('data-del')),
+              function () { good(); toast('Item removed.'); render(); },
+              function (e) { bad(); toast((e && e.message) || 'Could not remove item.'); });
+          };
+        });
+        var uom = $('#oi-uom');
+        if (uom) uom.onchange = function () { $('#oi-qtywrap').innerHTML = orderItemQtyInputsHtml({}); };
+        var cancel = $('#oi-cancel');
+        if (cancel) cancel.onclick = function () { OWIZ.editItem = null; render(); };
+        var save = $('#oi-save');
+        if (save) save.onclick = function () {
+          var form = readOrderItemForm();
+          var err = validateOrderItem(form);
+          var box = $('#oi-err');
+          if (err) { box.textContent = err; box.hidden = false; bad(); return; }
+          var p = OWIZ.editItem === 'new'
+            ? Repository.addOrderItem(o.id, form)
+            : Repository.updateOrderItem(o.id, OWIZ.editItem, form);
+          run6Call(p, function () {
+            good(); toast('Item saved.');
+            OWIZ.editItem = null; render();
+          }, function (e) { bad(); box.textContent = (e && e.message) || 'Could not save item.'; box.hidden = false; });
+        };
+      }
+    };
+  }
+
+  /* ---- step 3: review + submit ---- */
+  function step3() {
+    var items = o.items || [];
+    var linesHtml = items.map(function (it) {
+      return '<div class="kv"><span class="k">LINE ' + it.seq + '</span><span class="v">' +
+        esc(orderLineSummary(it)) + '</span></div>';
+    }).join('');
+    var actionHtml = '';
+    if (editable && o.status === 'DRAFT') {
+      actionHtml = '<div class="btn-row">' +
+        '<button class="btn btn-primary" id="or-ready" style="flex:1">MARK READY</button>' +
+        '<button class="btn" id="or-items" style="flex:1">← EDIT ITEMS</button></div>' +
+        '<button class="btn" id="or-header">← EDIT HEADER</button>';
+    } else if (pol.canSubmitOrder && (o.status === 'READY_FOR_REVIEW' || (o.status === 'DRAFT' && items.length))) {
+      actionHtml = '<div class="btn-row">' +
+        '<button class="btn btn-primary" id="or-submit" style="flex:1">SUBMIT ORDER →</button>' +
+        '<button class="btn" id="or-items" style="flex:1">← EDIT ITEMS</button></div>' +
+        '<button class="btn" id="or-header">← EDIT HEADER</button>';
+    } else {
+      actionHtml = '<p class="hint">This order is ' + esc(o.status) + ' and read-only.</p>';
+    }
+    return {
+      html: '<div class="screen">' + head('Step 3 of 3 — Review') +
+        '<div class="card"><h2>Header</h2>' +
+        '<div class="kv"><span class="k">Property</span><span class="v">' + esc(o.property) + '</span></div>' +
+        '<div class="kv"><span class="k">Account</span><span class="v">' + esc(o.account || '—') + '</span></div>' +
+        '<div class="kv"><span class="k">Requested</span><span class="v">' + fmtD(o.requestedDate) + '</span></div>' +
+        '<div class="kv"><span class="k">Scheduled</span><span class="v">' + fmtD(o.scheduledDate) + '</span></div>' +
+        '<div class="kv"><span class="k">Priority</span><span class="v">' + esc(o.priority) + '</span></div>' +
+        '<div class="kv"><span class="k">Status</span><span class="v">' + orderStatusChip(o.status) + '</span></div>' +
+        (o.internalRef ? '<div class="kv"><span class="k">Internal ref</span><span class="v mono">' + esc(o.internalRef) + '</span></div>' : '') +
+        (o.notes ? '<div class="kv"><span class="k">Notes</span><span class="v">' + esc(o.notes) + '</span></div>' : '') +
+        '</div>' +
+        '<div class="card"><h2>Items (' + items.length + ')</h2>' + (linesHtml || '<p class="hint">None.</p>') + '</div>' +
+        '<div class="err" id="or-err" hidden></div>' +
+        actionHtml +
+        '</div>',
+      mount: function () {
+        $('#back').onclick = function () { go('order'); };
+        var hi = $('#or-header');
+        if (hi) hi.onclick = function () { OWIZ.step = 1; render(); };
+        var im = $('#or-items');
+        if (im) im.onclick = function () { OWIZ.step = 2; render(); };
+        var rd = $('#or-ready');
+        if (rd) rd.onclick = function () {
+          run6Call(Repository.markOrderReady(o.id), function () {
+            good(); toast('Marked ready for review.'); render();
+          }, function (e) { bad(); toast((e && e.message) || 'Could not mark ready.'); });
+        };
+        var sb = $('#or-submit');
+        if (sb) sb.onclick = function () {
+          var box = $('#or-err');
+          box.hidden = true;
+          if (!confirm('Submit order ' + o.number + ' to the warehouse?')) return;
+          run6Call(Repository.submitOrder(o.id), function (res) {
+            good(); toast('Sales order ' + res.salesOrder.number + ' created.');
+            OWIZ.orderId = null; /* wizard done for this order */
+            go('sales-order', res.salesOrder.id);
+          }, function (e) {
+            bad();
+            box.textContent = (e && e.code === 'OFFLINE')
+              ? 'OFFLINE — ORDER NOT SUBMITTED. The order was not sent.'
+              : ((e && e.message) || 'Submit failed.');
+            box.hidden = false;
+          });
+        };
+      }
+    };
+  }
+
+  if (step === 1) return step1();
+  if (step === 2) return step2();
+  return step3();
+};
+
+/* ======================================================================
+   SALES ORDERS LIST — /sales-orders  (param = initial tab)
+   ====================================================================== */
+var SOTAB = 'OPEN';
+/* Spec §13: the four sales-order tabs. */
+function salesOrderTabs() { return ['OPEN', 'RELEASED', 'IN PROGRESS', 'COMPLETED']; }
+Screens['sales-orders'] = function (param) {
+  if (param && salesOrderTabs().indexOf(param) >= 0) SOTAB = param;
+  var pol = orderPolicy();
+  var tabs = salesOrderTabs();
+  var q = '';
+  function counts() {
+    var c = {};
+    tabs.forEach(function (t) { c[t] = salesOrdersByTab(t).length; });
+    return c;
+  }
+  function renderList() {
+    var list = salesOrdersByTab(SOTAB).filter(function (so) {
+      if (!q) return true;
+      var needle = q.toLowerCase();
+      return (so.number + ' ' + (so.property || '') + ' ' + (so.account || '')).toLowerCase().indexOf(needle) >= 0;
+    });
+    var host = $('#so-list');
+    if (!host) return;
+    host.innerHTML = list.length ? list.map(function (so) {
+      var wos = (so.lines || []).filter(function (l) { return l.workOrderId; }).length;
+      return '<button class="ocard" data-so="' + esc(so.id) + '">' +
+        '<span class="oc-num mono">' + esc(so.number) + '</span>' +
+        '<span class="oc-prop">' + esc(so.property || '—') + (so.account ? ' · ' + esc(so.account) : '') + '</span>' +
+        '<span class="oc-meta">' + soMaterialSummary(so) + ' · ' + esc(so.priority) +
+        (so.scheduledDate ? ' · ' + fmtD(so.scheduledDate) : '') + '</span>' +
+        '<span class="oc-chips">' + soStatusChip(so.status) + ' ' + soWarehouseChip(so) +
+        (wos ? ' <span class="chip">' + wos + ' WORK ORDER' + (wos === 1 ? '' : 'S') + '</span>' : '') + '</span>' +
+        '</button>';
+    }).join('') : '<p class="hint">No sales orders in this tab.</p>';
+    Array.prototype.forEach.call(host.querySelectorAll('[data-so]'), function (b) {
+      b.onclick = function () { go('sales-order', b.getAttribute('data-so')); };
+    });
+  }
+  var c = counts();
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← DASHBOARD</button>' +
+    '<div class="step-head">SALES ORDERS</div><h1>Sales Orders</h1>' +
+    '<div class="tabs">' + tabs.map(function (t) {
+      return '<button class="tab' + (t === SOTAB ? ' tab-on' : '') + '" data-tab="' + t + '">' +
+        t.replace(/_/g, ' ') + ' <span class="tab-n">' + c[t] + '</span></button>';
+    }).join('') + '</div>' +
+    '<div class="field"><label class="label" for="so-q">SEARCH</label>' +
+    '<input class="input mono" id="so-q" autocomplete="off" placeholder="SO #, property, account…"></div>' +
+    '<div class="ocards" id="so-list"></div>' +
+    (pol.canCreateOrder ? '<button class="btn" id="so-new">+ NEW ORDER</button>' : '') +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('dashboard'); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tab]'), function (b) {
+      b.onclick = function () { SOTAB = b.getAttribute('data-tab'); render(); };
+    });
+    $('#so-q').addEventListener('input', function () { q = this.value.trim(); renderList(); });
+    var nb = $('#so-new');
+    if (nb) nb.onclick = function () { go('order/new'); };
+    renderList();
+  } };
+};
+
+/* ======================================================================
+   SALES ORDER DETAIL — /sales-order/:id
+   ====================================================================== */
+Screens['sales-order'] = function (param) {
+  var so = param && salesOrderById(param);
+  if (!so) { setTimeout(function () { go('sales-orders'); }, 0); return { html: '' }; }
+  var pol = orderPolicy();
+  var releasing = null;
+
+  function lineHtml(l) {
+    var canRel = pol.canReleaseLine && l.status === 'OPEN' && !so.onHold && so.status !== 'CANCELLED';
+    var woLink = l.workOrderId ? (function () {
+      var w = woById(l.workOrderId);
+      return '<button class="btn btn-sm" data-wo="' + esc(l.workOrderId) + '">→ ' + esc(w ? w.number : 'WORK ORDER') + '</button>';
+    })() : '';
+    return '<div class="card soline">' +
+      '<div class="kv"><span class="k">LINE ' + l.seq + '</span><span class="v">' + soLineChip(l.status) + '</span></div>' +
+      '<div class="kv"><span class="k">Material</span><span class="v">' + esc(l.style) + ' / ' + esc(l.color) + '</span></div>' +
+      '<div class="kv"><span class="k">Type / UOM</span><span class="v">' + esc(l.materialType) + ' · ' + esc(l.uom) + '</span></div>' +
+      '<div class="kv"><span class="k">Width</span><span class="v">' + (typeof fmtWidth === 'function' ? fmtWidth(l.widthIn) : (l.widthIn || '—')) + '</span></div>' +
+      '<div class="kv"><span class="k">Warehouse qty' + (l.status === 'OPEN' ? ' (ordered)' : ' required') + '</span>' +
+      '<span class="v num">' + esc(orderItemQtyDisplay(l)) + '</span></div>' +
+      '<div class="btn-row">' +
+      (canRel ? '<button class="btn btn-primary" data-rel="' + esc(l.id) + '" style="flex:1">RELEASE TO WAREHOUSE →</button>' : '') +
+      woLink +
+      '</div>' +
+      '<div class="err" data-relerr="' + esc(l.id) + '" hidden></div>' +
+      '</div>';
+  }
+  function activityHtml() {
+    var evs = orderEventsFor(so.id).slice().reverse();
+    if (!evs.length) return '<p class="hint">No activity yet.</p>';
+    return evs.map(function (e) {
+      var when = e.at ? fmtAuditTime(e.at) : '';
+      return '<div class="kv"><span class="k">' + esc(when) + '</span><span class="v"><b>' +
+        esc(e.type.replace(/_/g, ' ')) + '</b>' +
+        (e.by ? ' · ' + esc(e.by) : '') +
+        (e.detail ? '<br><span class="hint">' + esc(e.detail) + '</span>' : '') + '</span></div>';
+    }).join('');
+  }
+  function actionsHtml() {
+    var out = '';
+    if (so.onHold && pol.canHoldSalesOrder)
+      out += '<button class="btn" id="so-resume">RESUME SALES ORDER</button>';
+    else if (pol.canHoldSalesOrder && so.status !== 'CANCELLED')
+      out += '<button class="btn" id="so-hold">PLACE ON HOLD</button>';
+    if (pol.canCancelSalesOrder && so.status !== 'CANCELLED')
+      out += ' <button class="btn btn-danger" id="so-cancel">CANCEL SALES ORDER</button>';
+    return out ? '<div class="btn-row">' + out + '</div>' : '';
+  }
+
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← SALES ORDERS</button>' +
+    '<div class="step-head">SALES ORDER</div>' +
+    '<h1 class="mono">' + esc(so.number) + '</h1>' +
+    '<div>' + soStatusChip(so.status) + ' ' + soWarehouseChip(so) + '</div>' +
+    '<div class="card">' +
+    '<div class="kv"><span class="k">Property</span><span class="v">' + esc(so.property) + '</span></div>' +
+    '<div class="kv"><span class="k">Account</span><span class="v">' + esc(so.account || '—') + '</span></div>' +
+    '<div class="kv"><span class="k">Requested</span><span class="v">' + fmtD(so.requestedDate) + '</span></div>' +
+    '<div class="kv"><span class="k">Scheduled</span><span class="v">' + fmtD(so.scheduledDate) + '</span></div>' +
+    '<div class="kv"><span class="k">Priority</span><span class="v">' + esc(so.priority) + '</span></div>' +
+    (so.onHold ? '<div class="kv"><span class="k">On hold</span><span class="v">' + esc(so.holdReason || '') +
+      (so.holdBy ? ' · ' + esc(so.holdBy) : '') + '</span></div>' : '') +
+    (so.notes ? '<div class="kv"><span class="k">Notes</span><span class="v">' + esc(so.notes) + '</span></div>' : '') +
+    '</div>' +
+    '<h2>Material lines</h2>' +
+    (so.lines || []).map(lineHtml).join('') +
+    '<h2>Actions</h2>' + actionsHtml() +
+    '<h2>Activity</h2><div class="card">' + activityHtml() + '</div>' +
+    '</div>';
+
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('sales-orders', SOTAB); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-wo]'), function (b) {
+      b.onclick = function () { go('work-order', b.getAttribute('data-wo')); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-rel]'), function (b) {
+      b.onclick = function () {
+        var lineId = b.getAttribute('data-rel');
+        var errBox = document.querySelector('[data-relerr="' + lineId + '"]');
+        b.disabled = true; b.textContent = 'RELEASING…';
+        run6Call(Repository.releaseSalesOrderLine(so.id, lineId), function (res) {
+          good(); toast(res.duplicate ? 'Line already released.' : 'Work order ' + res.workOrder.number + ' generated.');
+          go('work-order', res.workOrder.id);
+        }, function (e) {
+          bad(); b.disabled = false; b.textContent = 'RELEASE TO WAREHOUSE →';
+          errBox.textContent = (e && e.code === 'OFFLINE')
+            ? 'OFFLINE — SALES ORDER NOT RELEASED. Nothing was sent to the warehouse.'
+            : ((e && e.message) || 'Release failed.');
+          errBox.hidden = false;
+        });
+      };
+    });
+    var hd = $('#so-hold');
+    if (hd) hd.onclick = function () { reasonModal('Place ' + so.number + ' on hold?', 'PLACE ON HOLD',
+      function (reason) {
+        run6Call(Repository.holdSalesOrder(so.id, reason), function () {
+          good(); toast('Sales order on hold.'); render();
+        }, function (e) { bad(); toast((e && e.message) || 'Hold failed.'); });
+      }); };
+    var rs = $('#so-resume');
+    if (rs) rs.onclick = function () {
+      run6Call(Repository.resumeSalesOrder(so.id), function () {
+        good(); toast('Sales order resumed.'); render();
+      }, function (e) { bad(); toast((e && e.message) || 'Resume failed.'); });
+    };
+    var cx = $('#so-cancel');
+    if (cx) cx.onclick = function () { reasonModal('Cancel ' + so.number + '?', 'CANCEL SALES ORDER',
+      function (reason, force) {
+        run6Call(Repository.cancelSalesOrder(so.id, reason, { force: force }), function () {
+          good(); toast('Sales order cancelled.'); render();
+        }, function (e) {
+          if (e && e.code === 'WAREHOUSE_WORK_EXISTS') {
+            bad();
+            if (confirm('Warehouse work orders already exist: ' +
+                (e.data && e.data.workOrders || []).join(', ') +
+                '. Cancel the sales order anyway? Existing work orders are kept — never deleted.')) {
+              Repository.cancelSalesOrder(so.id, reason, { force: true }).then(function () {
+                good(); toast('Sales order cancelled. Existing work kept.'); render();
+              }).catch(function (e2) { bad(); toast((e2 && e2.message) || 'Cancel failed.'); });
+            }
+            return;
+          }
+          bad(); toast((e && e.message) || 'Cancel failed.');
+        });
+      }, true); };
+  } };
+};
+
+/* Small modal: text reason (+ optional "I understand" force checkbox for cancel). */
+function reasonModal(title, okLabel, onOk, allowForce) {
+  var wrap = document.createElement('div');
+  wrap.className = 'modal-wrap';
+  wrap.innerHTML = '<div class="modal" role="dialog" aria-modal="true"><h2>' + esc(title) + '</h2>' +
+    '<div class="field"><label class="label">REASON (required)</label>' +
+    '<input class="input" id="rm-reason" autocomplete="off"></div>' +
+    (allowForce ? '<label class="hint"><input type="checkbox" id="rm-force"> Keep existing work orders (they are never deleted)</label>' : '') +
+    '<div class="err" id="rm-err" hidden></div>' +
+    '<div class="btn-row"><button class="btn btn-primary" id="rm-ok" style="flex:1">' + esc(okLabel) + '</button>' +
+    '<button class="btn" id="rm-cancel" style="flex:1">CANCEL</button></div></div>';
+  document.body.appendChild(wrap);
+  wrap.querySelector('#rm-cancel').onclick = function () { wrap.remove(); };
+  wrap.querySelector('#rm-ok').onclick = function () {
+    var reason = wrap.querySelector('#rm-reason').value.trim();
+    if (!reason) {
+      var box = wrap.querySelector('#rm-err');
+      box.textContent = 'A reason is required.'; box.hidden = false; bad(); return;
+    }
+    var force = allowForce && wrap.querySelector('#rm-force').checked;
+    wrap.remove();
+    onOk(reason, force);
+  };
+}
 /* Hub: NEEDS INVENTORY / ASSIGNED / COMPLETED + search + filters.
    Also honors assign-inventory?workOrder=XS024536 (query) and
    assign-inventory/wo/<id> (path) entry from a work order. */

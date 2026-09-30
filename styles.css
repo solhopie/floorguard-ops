@@ -413,3 +413,32 @@ select.input { appearance: auto; }
 .linkbtn { background: none; border: none; color: inherit; font: inherit; text-decoration: underline;
   cursor: pointer; padding: 0; }
 @media (max-width: 480px) { .qcards { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---- Run 6: order wizard + sales orders ---- */
+.osteps { display: flex; gap: 8px; margin: 10px 0 14px; }
+.ostep { flex: 1; display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel-deep); }
+.osn { width: 24px; height: 24px; border-radius: 999px; display: inline-flex; align-items: center;
+  justify-content: center; font-weight: 700; font-size: .85rem; border: 1px solid var(--line); }
+.osl { font-size: .8rem; letter-spacing: .06em; color: var(--muted); }
+.os-cur { border-color: var(--accent); }
+.os-cur .osn { background: var(--accent); color: #fff; border-color: var(--accent); }
+.os-cur .osl { color: var(--accent); font-weight: 700; }
+.os-done .osn { background: var(--green, #2e7d32); color: #fff; border-color: var(--green, #2e7d32); }
+.os-todo { opacity: .55; }
+.ocards { display: grid; gap: 10px; margin: 10px 0; }
+.ocard { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left;
+  padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  cursor: pointer; width: 100%; color: inherit; font: inherit; }
+.ocard:active { border-color: var(--accent); }
+.oc-num { font-size: 1.05rem; font-weight: 700; }
+.oc-prop { font-size: .95rem; }
+.oc-meta { font-size: .8rem; color: var(--muted); }
+.oc-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.soline .btn-row { margin-top: 8px; }
+.chip-green { border-color: var(--green, #2e7d32) !important; color: var(--green, #2e7d32) !important; }
+.chip-blue { border-color: #1976d2 !important; color: #1976d2 !important; }
+.chip-amber { border-color: #ef6c00 !important; color: #ef6c00 !important; }
+.chip-red { border-color: var(--red) !important; color: var(--red) !important; }
+.chip-gray { opacity: .6; }
+.btn-sm { padding: 6px 10px; font-size: .8rem; width: auto; }

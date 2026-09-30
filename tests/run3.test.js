@@ -65,7 +65,7 @@ function freshDB() { S.DB.reset(); els = {}; S.DB.data.currentEmployee = 'Marcus
 
 /* ---------- schema 3 + seed ---------- */
 freshDB();
-ok(S.DB.data.schema === 4, 'seed schema is 4');
+ok(S.DB.data.schema === 5, 'seed schema is 5');
 ok(Array.isArray(S.FG().inventoryAssignments), 'inventoryAssignments collection exists');
 ok(Array.isArray(S.FG().assignmentEvents), 'assignmentEvents audit collection exists');
 ok(S.woById('XS024536').property === 'Ventura Pointe', 'XS024536 seed order exists');
@@ -85,7 +85,7 @@ ok(S.systemBalance('16628697') === 1034, '16628697 balance is 86\' 2" (1034in)')
   var v2 = S.DB.seed(); v2.schema = 2; v2.modules.floorguard = fg;
   store[S.DB.KEY] = JSON.stringify(v2);
   S.DB.load();
-  ok(S.DB.data.schema === 4, 'schema 2 migrates to 4');
+  ok(S.DB.data.schema === 5, 'schema 2 migrates to 5');
   ok(Array.isArray(S.FG().inventoryAssignments), 'migration adds inventoryAssignments');
   var w1 = S.woById('WO-1001');
   ok(w1.lines && w1.lines[0].requiredIn === 850, 'migration synthesizes material lines from flat WO fields');

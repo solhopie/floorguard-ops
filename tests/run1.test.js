@@ -61,7 +61,7 @@ function ok(cond, name) {
 
 /* DB layer */
 DB.data = DB.seed();
-ok(DB.data.schema === 4, 'seed schema is 4 (shared FloorGuard store + scheduling)');
+ok(DB.data.schema === 5, 'seed schema is 5 (shared FloorGuard store + scheduling + orders)');
 ok(DB.data.currentEmployee === null, 'seed has no session');
 ok(Array.isArray(DB.data.employees) && DB.data.employees.length === 3, 'seed has 3 demo employees');
 ok(DB.data.modules && typeof DB.data.modules === 'object', 'seed has modules namespace map');

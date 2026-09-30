@@ -262,7 +262,8 @@ var Mappers = {
       .map(function (l) {
         return {
           id: l.id, materialType: l.material_type || '', style: l.style || '',
-          color: l.color || '', uom: 'LF', widthIn: l.width_in, requiredIn: l.required_in
+          color: l.color || '', uom: 'LF', widthIn: l.width_in, requiredIn: l.required_in,
+          requiredCount: l.required_count != null ? Number(l.required_count) : null
         };
       });
     return {
@@ -276,6 +277,8 @@ var Mappers = {
       holdBy: w.hold_by || null,
       warehouseCompletedAt: w.warehouse_completed_at || null,
       warehouseCompletedBy: w.warehouse_completed_by || null,
+      salesOrderId: w.sales_order_id || null,
+      salesOrderLineId: w.sales_order_line_id || null,
       notes: w.notes || '',
       createdAt: w.created_at, lines: ls
     };
@@ -293,6 +296,8 @@ var Mappers = {
       hold_at: wo.holdAt || null, hold_by: wo.holdBy || null,
       warehouse_completed_at: wo.warehouseCompletedAt || null,
       warehouse_completed_by: wo.warehouseCompletedBy || null,
+      sales_order_id: wo.salesOrderId || null,
+      sales_order_line_id: wo.salesOrderLineId || null,
       notes: wo.notes || null
     };
   },
@@ -301,7 +306,80 @@ var Mappers = {
       id: line.id, work_order_id: workOrderId,
       material_type: line.materialType || null, style: line.style || null,
       color: line.color || null, width_in: line.widthIn || null,
-      required_in: line.requiredIn || 0
+      required_in: line.requiredIn || 0,
+      required_count: line.requiredCount != null ? line.requiredCount : null
+    };
+  },
+  /* ---- Run 6: orders / order items / sales orders / sales order lines ---- */
+  rowToOrder: function (r, itemRows) {
+    var items = (itemRows || []).filter(function (i) { return i.order_id === r.id; })
+      .sort(function (a, b) { return (a.seq || 0) - (b.seq || 0); })
+      .map(function (i) {
+        return {
+          id: i.id, seq: i.seq, style: i.style || '', color: i.color || '',
+          materialType: (i.material_type || '').toUpperCase(), uom: i.uom || 'LF',
+          widthIn: i.width_in, quantityIn: i.quantity_in,
+          quantity: i.quantity != null ? Number(i.quantity) : null,
+          notes: i.notes || ''
+        };
+      });
+    return {
+      id: r.id, number: r.number, property: r.property || '', account: r.account || '',
+      requestedDate: r.requested_date || null, scheduledDate: r.scheduled_date || null,
+      priority: r.priority || 'NORMAL', createdBy: r.created_by || '',
+      warehouseId: r.warehouse_id, internalRef: r.internal_ref || '', notes: r.notes || '',
+      status: r.status || 'DRAFT', items: items,
+      createdAt: r.created_at, updatedAt: r.updated_at,
+      submittedAt: r.submitted_at || null, salesOrderId: r.sales_order_id || null
+    };
+  },
+  orderToRow: function (o) {
+    return {
+      id: o.id, number: o.number, warehouse_id: o.warehouseId,
+      property: o.property || null, account: o.account || null,
+      requested_date: o.requestedDate || null, scheduled_date: o.scheduledDate || null,
+      priority: o.priority || 'NORMAL', created_by: o.createdBy || null,
+      internal_ref: o.internalRef || null, notes: o.notes || null,
+      status: o.status || 'DRAFT', sales_order_id: o.salesOrderId || null,
+      submitted_at: o.submittedAt || null
+    };
+  },
+  itemToRow: function (it, orderId) {
+    return {
+      id: it.id, order_id: orderId, seq: it.seq,
+      style: it.style || null, color: it.color || null,
+      material_type: it.materialType || null, uom: it.uom || 'LF',
+      width_in: it.widthIn != null ? it.widthIn : null,
+      quantity_in: it.quantityIn != null ? it.quantityIn : null,
+      quantity: it.quantity != null ? it.quantity : null,
+      notes: it.notes || null
+    };
+  },
+  rowToSalesOrder: function (r, lineRows) {
+    var lines = (lineRows || []).filter(function (l) { return l.sales_order_id === r.id; })
+      .sort(function (a, b) { return (a.seq || 0) - (b.seq || 0); })
+      .map(function (l) {
+        return {
+          id: l.id, seq: l.seq, sourceItemId: l.source_item_id || null,
+          style: l.style || '', color: l.color || '',
+          materialType: (l.material_type || '').toUpperCase(), uom: l.uom || 'LF',
+          widthIn: l.width_in, orderedIn: l.ordered_in,
+          orderedQty: l.ordered_qty != null ? Number(l.ordered_qty) : null,
+          warehouseQtyRequired: l.warehouse_qty_required != null ? Number(l.warehouse_qty_required) : null,
+          status: l.status || 'OPEN', workOrderId: l.work_order_id || null
+        };
+      });
+    return {
+      id: r.id, number: r.number, sourceOrderId: r.source_order_id || null,
+      property: r.property || '', account: r.account || '',
+      warehouseId: r.warehouse_id, priority: r.priority || 'NORMAL',
+      requestedDate: r.requested_date || null, scheduledDate: r.scheduled_date || null,
+      status: r.status || 'OPEN', createdBy: r.created_by || '',
+      submittedBy: r.submitted_by || '', notes: r.notes || '',
+      onHold: !!r.on_hold, holdReason: r.hold_reason || null,
+      holdAt: r.hold_at || null, holdBy: r.hold_by || null,
+      createdAt: r.created_at, submittedAt: r.submitted_at || null,
+      updatedAt: r.updated_at, lines: lines
     };
   },
   /* ---- inventory assignments ---- */
@@ -418,6 +496,26 @@ var LocalRepo = {
   assignEmployee: function (woId, assigneeId) { return Promise.resolve(assignEmployeeLocal(woId, assigneeId)); },
   completeWarehouseWork: function (woId) { return Promise.resolve(completeWarehouseWorkLocal(woId)); },
   addWorkOrderNote: function (woId, text) { return Promise.resolve(addWorkOrderNoteLocal(woId, text)); },
+  /* ---- Run 6: order + sales order foundation ---- */
+  createOrder: function (h) { return Promise.resolve(createOrderLocal(h)); },
+  getOrder: function (id) { return Promise.resolve(orderById(id)); },
+  updateOrderHeader: function (id, patch) { return Promise.resolve(updateOrderHeaderLocal(id, patch)); },
+  addOrderItem: function (id, it) { return Promise.resolve(addOrderItemLocal(id, it)); },
+  updateOrderItem: function (id, itemId, patch) { return Promise.resolve(updateOrderItemLocal(id, itemId, patch)); },
+  removeOrderItem: function (id, itemId) { return Promise.resolve(removeOrderItemLocal(id, itemId)); },
+  deleteOrder: function (id) { return Promise.resolve(deleteOrderLocal(id)); },
+  getDraftOrders: function () { return Promise.resolve(getDraftOrdersLocal()); },
+  getRecentSubmittedOrders: function (n) { return Promise.resolve(getRecentSubmittedOrdersLocal(n)); },
+  markOrderReady: function (id) { return Promise.resolve(markOrderReadyLocal(id)); },
+  submitOrder: function (id) { return Promise.resolve(submitOrderLocal(id)); },
+  getSalesOrders: function () { return Promise.resolve(getSalesOrdersLocal()); },
+  getSalesOrder: function (id) { return Promise.resolve(salesOrderById(id)); },
+  releaseSalesOrderLine: function (soId, lineId) { return Promise.resolve(releaseSalesOrderLineLocal(soId, lineId)); },
+  holdSalesOrder: function (soId, reason) { return Promise.resolve(holdSalesOrderLocal(soId, reason)); },
+  resumeSalesOrder: function (soId) { return Promise.resolve(resumeSalesOrderLocal(soId)); },
+  cancelSalesOrder: function (soId, reason, opts) { return Promise.resolve(cancelSalesOrderLocal(soId, reason, opts)); },
+  /* ---- Run 6 §0: reopen a completed warehouse job ---- */
+  reopenWarehouseWork: function (woId, reason) { return Promise.resolve(reopenWarehouseWorkLocal(woId, reason)); },
   getRoll: function (id) { return Promise.resolve(rollById(id)); },
   getRollHistory: function (id) { return Promise.resolve(buildLocalRollHistory(id)); },
   recordCut: function (o) { return Promise.resolve(CutService.recordCut(o)); },
@@ -433,6 +531,23 @@ var LocalRepo = {
     fg.countSessions.push(rec);
     DB.save();
     return Promise.resolve({ ok: true, session: rec });
+  },
+  deleteOrder: function (id) {
+    var self = this;
+    self._requireOnline('OFFLINE — DRAFT NOT DISCARDED');
+    self._requireOrderPolicy(orderPolicy().canCreateOrder, 'Manager role required.');
+    var o = orderById(id);
+    if (!o) throw RepoError('NOT_FOUND', 'Order not found.');
+    if (o.status !== 'DRAFT' && o.status !== 'READY_FOR_REVIEW')
+      throw RepoError('INVALID_INPUT', 'Only drafts can be discarded.');
+    return pgFetch('/rest/v1/orders?id=eq.' + encodeURIComponent(id), { method: 'DELETE' })
+      .then(function () {
+        FG().orders = (FG().orders || []).filter(function (x) { return x.id !== id; });
+        DB.save();
+        logOrderEvent('ORDER_DISCARDED', { orderId: id, orderNumber: o.number,
+          detail: 'Draft ' + o.number + ' discarded by ' + DB.data.currentEmployee + '.' });
+        return { ok: true };
+      });
   },
   recordCycleCount: function (o) {
     /* Mirrors submitCount()'s record-building (same statuses, same MB
@@ -704,13 +819,23 @@ var SharedRepo = {
   },
   completeWarehouseWork: function (woId) {
     var self = this;
-    var w = self._validateJobWrite(woId, true);
+    /* Run 6 §0: the assigned employee may complete their own job;
+       supervisor / manager / admin may complete any job. */
+    var w = self._validateJobWrite(woId, false);
+    if (!isSupervisorRole(DB.data.currentEmployee) && !isWoAssignee(w))
+      throw RepoError('FORBIDDEN', 'Not authorized to complete this job.');
     if (w.onHold) throw RepoError('INVALID_INPUT', 'Job is on hold.');
     /* Guard against fresh backend state: hydrate first, then run the same
        completion guard local mode uses. */
     return self._refreshJobs().then(function () {
       var fresh = woById(woId);
       if (!fresh) throw RepoError('NOT_FOUND', 'Work order not found.');
+      /* Run 6: count-based lines have no cut-based verification engine —
+         a plain assignee cannot self-certify them. */
+      var isSup = isSupervisorRole(DB.data.currentEmployee);
+      var countLines = woCountBasedLines(fresh);
+      if (!isSup && countLines.length)
+        throw RepoError('FORBIDDEN', 'Count-based lines require supervisor verification.');
       var blockers = warehouseCompletionBlockers(fresh);
       if (blockers.length)
         throw RepoError('LINES_INCOMPLETE', 'Material lines incomplete.',
@@ -723,10 +848,30 @@ var SharedRepo = {
           fresh.opStatus = 'COMPLETE'; fresh.warehouseCompletedAt = at; fresh.warehouseCompletedBy = by;
           DB.save();
           logAssignEvent('WAREHOUSE_WORK_COMPLETED', { workOrderId: fresh.id,
-            detail: 'Warehouse work completed by ' + by + '.' });
+            detail: 'Warehouse work completed by ' + by + '.' +
+              (countLines.length ? ' (' + countLines.length + ' count-based line(s) accepted under supervisor judgment.)' : '') });
           return { ok: true, workOrder: fresh };
         });
     });
+  },
+  /* Run 6 §0: authorized supervisor/manager roles may reopen a completed
+     warehouse job for later correction. Reason is required and audited. */
+  reopenWarehouseWork: function (woId, reason) {
+    var self = this;
+    var w = self._validateJobWrite(woId, true);
+    reason = String(reason || '').trim();
+    if (!reason) throw RepoError('INVALID_INPUT', 'Reason is required.');
+    if (w.opStatus !== 'COMPLETE') throw RepoError('INVALID_INPUT', 'Job is not completed.');
+    return self._patch('work_orders', 'id=eq.' + encodeURIComponent(woId),
+        { status: 'IN_PROGRESS', warehouse_completed_at: null, warehouse_completed_by: null })
+      .then(function () { return self._woAudit('WAREHOUSE_WORK_REOPENED', w, { reason: reason }); })
+      .then(function () {
+        w.opStatus = 'IN_PROGRESS'; w.warehouseCompletedAt = null; w.warehouseCompletedBy = null;
+        DB.save();
+        logAssignEvent('WAREHOUSE_WORK_REOPENED', { workOrderId: w.id,
+          detail: 'Warehouse job reopened by ' + DB.data.currentEmployee + ': ' + reason });
+        return { ok: true, workOrder: w };
+      });
   },
   addWorkOrderNote: function (woId, text) {
     var self = this;
@@ -737,6 +882,349 @@ var SharedRepo = {
       .then(function () {
         logAssignEvent('WORK_ORDER_NOTE_ADDED', { workOrderId: w.id, detail: text });
         return { ok: true };
+      });
+  },
+
+  /* ---- Run 6: order + sales order foundation ----
+     Reads: refresh the hydrated mirror (cached reads stay acceptable
+     offline), then derive from the in-memory store — the same derivation
+     local mode uses. Draft edits go through PostgREST directly.
+     SUBMIT and RELEASE are authoritative business mutations: they execute
+     inside atomic server-side RPCs and fail fast offline via pgFetch's
+     preflight — they NEVER pretend to sync. UI must not call Supabase
+     directly; every backend touch goes through these methods. */
+  _orderAudit: function (action, refs, extra) {
+    var e = {
+      id: rid('A'), user_id: null, user_name: DB.data.currentEmployee || null,
+      warehouse_id: this.wh(), action: action,
+      entity_type: refs.salesOrderId ? 'sales_order' : 'order',
+      entity_id: refs.salesOrderId || refs.orderId || null,
+      related_work_order_id: refs.workOrderId || null, related_roll_id: null,
+      old_value: null, new_value: extra || null, created_at: isoNow()
+    };
+    return this._post('audit_events', [e]).then(function () { return e; });
+  },
+  _refreshOrders: function () {
+    var self = this;
+    return self.hydrate().catch(function () { return null; /* offline: use cached */ })
+      .then(function () { return true; });
+  },
+  _requireOrderPolicy: function (can, errMsg) {
+    if (!can) throw RepoError('FORBIDDEN', errMsg || 'Not authorized for this action.');
+  },
+  /* Run 6 §24/§29: offline mutations fail fast with the exact spec phrases —
+     never a misleading NOT_FOUND / NETWORK error, and never a silent queue. */
+  _requireOnline: function (offlineMsg) {
+    if (!isOnline()) throw RepoError('OFFLINE', offlineMsg || 'OFFLINE — not synced.');
+  },
+  createOrder: function (h) {
+    var self = this;
+    self._requireOnline('OFFLINE — ORDER NOT CREATED');
+    self._requireOrderPolicy(orderPolicy().canCreateOrder, 'Manager role required.');
+    var err = validateOrderHeader(h || {});
+    if (err) throw RepoError('INVALID_INPUT', err);
+    h = h || {};
+    var now = isoNow();
+    var o = {
+      id: rid('ORD'), number: nextOrderNumber(),
+      property: String(h.property).trim(),
+      account: String(h.account || accountForProperty(h.property) || '').trim(),
+      requestedDate: h.requestedDate || null, scheduledDate: h.scheduledDate || null,
+      priority: h.priority || 'NORMAL', createdBy: DB.data.currentEmployee,
+      warehouseId: self.wh(), internalRef: String(h.internalRef || '').trim(),
+      notes: String(h.notes || '').trim(), status: 'DRAFT', items: [],
+      createdAt: now, updatedAt: now, submittedAt: null, salesOrderId: null
+    };
+    return self._post('orders', [Mappers.orderToRow(o)])
+      .then(function () { return self._orderAudit('ORDER_CREATED', { orderId: o.id }, { number: o.number }); })
+      .then(function () {
+        FG().orders.push(o); DB.save();
+        logOrderEvent('ORDER_CREATED', { orderId: o.id, orderNumber: o.number });
+        return { ok: true, order: o };
+      });
+  },
+  getOrder: function (id) {
+    var self = this;
+    return self._refreshOrders().then(function () { return orderById(id); });
+  },
+  getDraftOrders: function () {
+    var self = this;
+    return self._refreshOrders().then(function () { return getDraftOrdersLocal(); });
+  },
+  getRecentSubmittedOrders: function (n) {
+    var self = this;
+    return self._refreshOrders().then(function () { return getRecentSubmittedOrdersLocal(n); });
+  },
+  updateOrderHeader: function (id, patch) {
+    var self = this;
+    self._requireOnline('OFFLINE — ORDER NOT UPDATED');
+    self._requireOrderPolicy(orderPolicy().canCreateOrder, 'Manager role required.');
+    var o = orderById(id);
+    if (!o) throw RepoError('NOT_FOUND', 'Order not found.');
+    if (!orderEditable(o)) throw RepoError('INVALID_INPUT', 'Order is not editable.');
+    var merged = { property: o.property, account: o.account, requestedDate: o.requestedDate,
+      scheduledDate: o.scheduledDate, priority: o.priority, internalRef: o.internalRef, notes: o.notes };
+    ['property', 'account', 'requestedDate', 'scheduledDate', 'priority', 'internalRef', 'notes'].forEach(function (k) {
+      if (patch && k in patch) merged[k] = patch[k];
+    });
+    var err = validateOrderHeader(merged);
+    if (err) throw RepoError('INVALID_INPUT', err);
+    var rowPatch = {
+      property: String(merged.property).trim(), account: String(merged.account || '').trim() || null,
+      requested_date: merged.requestedDate || null, scheduled_date: merged.scheduledDate || null,
+      priority: merged.priority || 'NORMAL',
+      internal_ref: String(merged.internalRef || '').trim() || null,
+      notes: String(merged.notes || '').trim() || null, updated_at: isoNow()
+    };
+    return self._patch('orders', 'id=eq.' + encodeURIComponent(id), rowPatch).then(function () {
+      o.property = rowPatch.property; o.account = String(merged.account || '').trim();
+      o.requestedDate = merged.requestedDate || null; o.scheduledDate = merged.scheduledDate || null;
+      o.priority = merged.priority || 'NORMAL';
+      o.internalRef = String(merged.internalRef || '').trim(); o.notes = String(merged.notes || '').trim();
+      o.updatedAt = rowPatch.updated_at;
+      DB.save();
+      logOrderEvent('ORDER_HEADER_UPDATED', { orderId: o.id, orderNumber: o.number });
+      return { ok: true, order: o };
+    });
+  },
+  addOrderItem: function (id, it) {
+    var self = this;
+    self._requireOnline('OFFLINE — ORDER ITEM NOT ADDED');
+    self._requireOrderPolicy(orderPolicy().canCreateOrder, 'Manager role required.');
+    var o = orderById(id);
+    if (!o) throw RepoError('NOT_FOUND', 'Order not found.');
+    if (!orderEditable(o)) throw RepoError('INVALID_INPUT', 'Order is not editable.');
+    var err = validateOrderItem(it || {});
+    if (err) throw RepoError('INVALID_INPUT', err);
+    it = it || {};
+    var rec = {
+      id: rid('OI'), seq: (o.items || []).length + 1,
+      style: String(it.style).trim(), color: String(it.color || '').trim(),
+      materialType: it.materialType, uom: it.uom,
+      widthIn: it.widthIn != null && it.widthIn !== '' ? Math.round(Number(it.widthIn)) : null,
+      quantityIn: it.uom === 'LF' ? Math.round(Number(it.quantityIn)) : null,
+      quantity: it.uom === 'LF' ? null : Number(it.quantity),
+      notes: String(it.notes || '').trim()
+    };
+    return self._post('order_items', [Mappers.itemToRow(rec, id)])
+      .then(function () { return self._orderAudit('ORDER_ITEM_ADDED', { orderId: id }, { item_id: rec.id }); })
+      .then(function () {
+        o.items.push(rec); o.updatedAt = isoNow(); DB.save();
+        logOrderEvent('ORDER_ITEM_ADDED', { orderId: o.id, orderNumber: o.number,
+          detail: rec.style + ' · ' + orderItemQtyDisplay(rec) });
+        return { ok: true, order: o, item: rec };
+      });
+  },
+  updateOrderItem: function (id, itemId, patch) {
+    var self = this;
+    self._requireOnline('OFFLINE — ORDER ITEM NOT UPDATED');
+    self._requireOrderPolicy(orderPolicy().canCreateOrder, 'Manager role required.');
+    var o = orderById(id);
+    if (!o) throw RepoError('NOT_FOUND', 'Order not found.');
+    if (!orderEditable(o)) throw RepoError('INVALID_INPUT', 'Order is not editable.');
+    var rec = orderItemById(o, itemId);
+    if (!rec) throw RepoError('NOT_FOUND', 'Item not found.');
+    var merged = { style: rec.style, color: rec.color, materialType: rec.materialType, uom: rec.uom,
+      widthIn: rec.widthIn, quantityIn: rec.quantityIn, quantity: rec.quantity, notes: rec.notes };
+    ['style', 'color', 'materialType', 'uom', 'widthIn', 'quantityIn', 'quantity', 'notes'].forEach(function (k) {
+      if (patch && k in patch) merged[k] = patch[k];
+    });
+    var err = validateOrderItem(merged);
+    if (err) throw RepoError('INVALID_INPUT', err);
+    var rowPatch = {
+      style: String(merged.style).trim(), color: String(merged.color || '').trim() || null,
+      material_type: merged.materialType, uom: merged.uom,
+      width_in: merged.widthIn != null && merged.widthIn !== '' ? Math.round(Number(merged.widthIn)) : null,
+      quantity_in: merged.uom === 'LF' ? Math.round(Number(merged.quantityIn)) : null,
+      quantity: merged.uom === 'LF' ? null : Number(merged.quantity),
+      notes: String(merged.notes || '').trim() || null
+    };
+    return self._patch('order_items', 'id=eq.' + encodeURIComponent(itemId), rowPatch).then(function () {
+      rec.style = rowPatch.style; rec.color = String(merged.color || '').trim();
+      rec.materialType = merged.materialType; rec.uom = merged.uom;
+      rec.widthIn = rowPatch.width_in; rec.quantityIn = rowPatch.quantity_in; rec.quantity = rowPatch.quantity;
+      rec.notes = String(merged.notes || '').trim();
+      o.updatedAt = isoNow(); DB.save();
+      logOrderEvent('ORDER_ITEM_UPDATED', { orderId: o.id, orderNumber: o.number, detail: 'Line ' + rec.seq });
+      return { ok: true, order: o, item: rec };
+    });
+  },
+  removeOrderItem: function (id, itemId) {
+    var self = this;
+    self._requireOnline('OFFLINE — ORDER ITEM NOT REMOVED');
+    self._requireOrderPolicy(orderPolicy().canCreateOrder, 'Manager role required.');
+    var o = orderById(id);
+    if (!o) throw RepoError('NOT_FOUND', 'Order not found.');
+    if (!orderEditable(o)) throw RepoError('INVALID_INPUT', 'Order is not editable.');
+    var rec = orderItemById(o, itemId);
+    if (!rec) throw RepoError('NOT_FOUND', 'Item not found.');
+    return pgFetch('/rest/v1/order_items?id=eq.' + encodeURIComponent(itemId), { method: 'DELETE' })
+      .then(function () {
+        o.items = (o.items || []).filter(function (i) { return i.id !== itemId; });
+        o.items.forEach(function (i, n) { i.seq = n + 1; });
+        o.updatedAt = isoNow(); DB.save();
+        logOrderEvent('ORDER_ITEM_REMOVED', { orderId: o.id, orderNumber: o.number, detail: rec.style });
+        return { ok: true, order: o };
+      });
+  },
+  markOrderReady: function (id) {
+    var self = this;
+    self._requireOnline('OFFLINE — ORDER NOT MARKED READY');
+    self._requireOrderPolicy(orderPolicy().canMarkReady, 'Manager role required.');
+    var o = orderById(id);
+    if (!o) throw RepoError('NOT_FOUND', 'Order not found.');
+    if (o.status !== 'DRAFT') throw RepoError('INVALID_INPUT', 'Order is not a draft.');
+    if (!(o.items || []).length) throw RepoError('INVALID_INPUT', 'Add at least one item.');
+    return self._patch('orders', 'id=eq.' + encodeURIComponent(id),
+        { status: 'READY_FOR_REVIEW', updated_at: isoNow() })
+      .then(function () {
+        o.status = 'READY_FOR_REVIEW'; o.updatedAt = isoNow(); DB.save();
+        logOrderEvent('ORDER_MARKED_READY', { orderId: o.id, orderNumber: o.number });
+        return { ok: true, order: o };
+      });
+  },
+  /* Atomic submit via the submit_sales_order RPC. Idempotent: a retried
+     submit on an already-submitted order returns the existing sales order. */
+  submitOrder: function (id) {
+    var self = this;
+    self._requireOnline('OFFLINE — ORDER NOT SUBMITTED');
+    self._requireOrderPolicy(orderPolicy().canSubmitOrder, 'Manager role required.');
+    var o = orderById(id);
+    if (!o) throw RepoError('NOT_FOUND', 'Order not found.');
+    if (o.status === 'SUBMITTED' && o.salesOrderId) {
+      return self._refreshOrders().then(function () {
+        var existing = salesOrderById(o.salesOrderId);
+        if (existing) return { ok: true, salesOrder: existing, order: o, duplicate: true };
+        throw RepoError('NOT_FOUND', 'Sales order missing.');
+      });
+    }
+    if (!orderEditable(o)) throw RepoError('INVALID_INPUT', 'Order is not submittable.');
+    if (!(o.items || []).length) throw RepoError('INVALID_INPUT', 'Add at least one item.');
+    var soId = rid('SO'), number = nextSalesOrderNumber(), by = DB.data.currentEmployee;
+    return self._rpc('submit_sales_order', {
+        p_order_id: id, p_sales_order_id: soId, p_number: number, p_submitted_by: by
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshOrders().then(function () {
+          var so = salesOrderById(res.sales_order_id);
+          var oo = orderById(id);
+          logOrderEvent('ORDER_SUBMITTED', { orderId: id, orderNumber: oo && oo.number,
+            salesOrderId: res.sales_order_id, salesOrderNumber: res.number });
+          return { ok: true, salesOrder: so, order: oo, duplicate: !!res.duplicate };
+        });
+      });
+  },
+  getSalesOrders: function () {
+    var self = this;
+    return self._refreshOrders().then(function () { return getSalesOrdersLocal(); });
+  },
+  getSalesOrder: function (id) {
+    var self = this;
+    return self._refreshOrders().then(function () { return salesOrderById(id); });
+  },
+  /* Idempotent release: a retried release on a released line returns the
+     existing work order — never a duplicate. */
+  releaseSalesOrderLine: function (soId, lineId) {
+    var self = this;
+    self._requireOnline('OFFLINE — SALES ORDER NOT RELEASED');
+    self._requireOrderPolicy(orderPolicy().canReleaseLine, 'Supervisor role required.');
+    var so = salesOrderById(soId);
+    if (!so) throw RepoError('NOT_FOUND', 'Sales order not found.');
+    if (so.onHold) throw RepoError('INVALID_INPUT', 'Sales order is on hold.');
+    if (so.status === 'CANCELLED') throw RepoError('INVALID_INPUT', 'Sales order is cancelled.');
+    var line = soLineById(so, lineId);
+    if (!line) throw RepoError('NOT_FOUND', 'Line not found.');
+    if (line.status === 'RELEASED' && line.workOrderId) {
+      return self.getWorkOrder(line.workOrderId).then(function (wo) {
+        return { ok: true, workOrder: wo, salesOrder: so, duplicate: true };
+      });
+    }
+    var wo = buildWorkOrderFromLine(so, line);
+    var wl = wo.lines[0];
+    return self._rpc('release_sales_order_line', {
+        p_line_id: lineId, p_work_order_id: wo.id, p_wo_number: wo.number,
+        p_style: wl.style, p_color: wl.color, p_material_type: wl.materialType,
+        p_uom: wl.uom, p_width_in: wl.widthIn,
+        p_required_in: wl.requiredIn, p_required_count: wl.requiredCount,
+        p_by: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshOrders().then(function () {
+          return self.getWorkOrder(res.work_order_id);
+        }).then(function (freshWo) {
+          var fso = salesOrderById(soId);
+          logOrderEvent('SALES_ORDER_LINE_RELEASED', { salesOrderId: soId,
+            salesOrderNumber: fso && fso.number, workOrderId: res.work_order_id,
+            detail: 'Line ' + line.seq + ' released to warehouse.' });
+          logOrderEvent('WORK_ORDER_GENERATED', { salesOrderId: soId,
+            salesOrderNumber: fso && fso.number, workOrderId: res.work_order_id,
+            detail: (freshWo && freshWo.number) + ' generated from line ' + line.seq + '.' });
+          return { ok: true, workOrder: freshWo, salesOrder: fso, duplicate: !!res.duplicate };
+        });
+      });
+  },
+  holdSalesOrder: function (soId, reason) {
+    var self = this;
+    self._requireOnline('OFFLINE — SALES ORDER NOT HELD');
+    self._requireOrderPolicy(orderPolicy().canHoldSalesOrder, 'Manager role required.');
+    reason = String(reason || '').trim();
+    if (!reason) throw RepoError('INVALID_INPUT', 'Reason is required.');
+    var so = salesOrderById(soId);
+    if (!so) throw RepoError('NOT_FOUND', 'Sales order not found.');
+    if (so.onHold) throw RepoError('INVALID_INPUT', 'Already on hold.');
+    if (so.status === 'CANCELLED') throw RepoError('INVALID_INPUT', 'Sales order is cancelled.');
+    var at = isoNow(), by = DB.data.currentEmployee;
+    return self._patch('sales_orders', 'id=eq.' + encodeURIComponent(soId),
+        { on_hold: true, hold_reason: reason, hold_at: at, hold_by: by, status: 'ON_HOLD', updated_at: at })
+      .then(function () { return self._orderAudit('SALES_ORDER_HELD', { salesOrderId: soId }, { reason: reason }); })
+      .then(function () {
+        so.onHold = true; so.holdReason = reason; so.holdAt = at; so.holdBy = by;
+        so.status = 'ON_HOLD'; so.updatedAt = at; DB.save();
+        logOrderEvent('SALES_ORDER_HELD', { salesOrderId: so.id, salesOrderNumber: so.number, detail: reason });
+        return { ok: true, salesOrder: so };
+      });
+  },
+  resumeSalesOrder: function (soId) {
+    var self = this;
+    self._requireOnline('OFFLINE — SALES ORDER NOT RESUMED');
+    self._requireOrderPolicy(orderPolicy().canHoldSalesOrder, 'Manager role required.');
+    var so = salesOrderById(soId);
+    if (!so) throw RepoError('NOT_FOUND', 'Sales order not found.');
+    if (!so.onHold) throw RepoError('INVALID_INPUT', 'Not on hold.');
+    var at = isoNow();
+    return self._patch('sales_orders', 'id=eq.' + encodeURIComponent(soId),
+        { on_hold: false, hold_reason: null, hold_at: null, hold_by: null, status: 'OPEN', updated_at: at })
+      .then(function () { return self._orderAudit('SALES_ORDER_RESUMED', { salesOrderId: soId }, null); })
+      .then(function () {
+        so.onHold = false; so.holdReason = null; so.holdAt = null; so.holdBy = null;
+        so.status = 'OPEN'; so.updatedAt = at; DB.save();
+        logOrderEvent('SALES_ORDER_RESUMED', { salesOrderId: so.id, salesOrderNumber: so.number });
+        return { ok: true, salesOrder: so };
+      });
+  },
+  cancelSalesOrder: function (soId, reason, opts) {
+    var self = this;
+    self._requireOnline('OFFLINE — SALES ORDER NOT CANCELLED');
+    self._requireOrderPolicy(orderPolicy().canCancelSalesOrder, 'Manager role required.');
+    reason = String(reason || '').trim();
+    if (!reason) throw RepoError('INVALID_INPUT', 'Reason is required.');
+    var so = salesOrderById(soId);
+    if (!so) throw RepoError('NOT_FOUND', 'Sales order not found.');
+    if (so.status === 'CANCELLED') throw RepoError('INVALID_INPUT', 'Already cancelled.');
+    var wos = (so.lines || []).map(function (l) { return l.workOrderId && woById(l.workOrderId); }).filter(Boolean);
+    if (wos.length && !(opts && opts.force))
+      throw RepoError('WAREHOUSE_WORK_EXISTS', 'Warehouse work already exists for this sales order.',
+        { workOrders: wos.map(function (w) { return w.number; }) });
+    var at = isoNow();
+    return self._patch('sales_orders', 'id=eq.' + encodeURIComponent(soId),
+        { status: 'CANCELLED', on_hold: false, updated_at: at })
+      .then(function () { return self._orderAudit('SALES_ORDER_CANCELLED', { salesOrderId: soId }, { reason: reason }); })
+      .then(function () {
+        so.status = 'CANCELLED'; so.onHold = false; so.updatedAt = at; DB.save();
+        logOrderEvent('SALES_ORDER_CANCELLED', { salesOrderId: so.id, salesOrderNumber: so.number, detail: reason });
+        return { ok: true, salesOrder: so };
       });
   },
 
@@ -976,17 +1464,25 @@ var SharedRepo = {
       get('inventory_assignments'), get('cut_transactions'),
       get('cycle_count_sessions'), get('cycle_count_records'),
       get('history_events'), get('documents'), get('history_card_imports'),
-      get('discrepancies'), get('audit_events')
+      get('discrepancies'), get('audit_events'),
+      /* Run 6: commercial layer. order_items / sales_order_lines carry no
+         warehouse_id — they are scoped to their parent order's warehouse. */
+      get('orders'), self._get('order_items', { select: '*' }),
+      get('sales_orders'), self._get('sales_order_lines', { select: '*' })
     ]).then(function (p) {
       var warehouses = p[0], users = p[1], rollRows = p[2], woRows = p[3],
           lineRows = p[4], asnRows = p[5], cutRows = p[6], sessRows = p[7],
           countRows = p[8], histRows = p[9], docRows = p[10], impRows = p[11],
-          discRows = p[12], auditRows = p[13];
+          discRows = p[12], auditRows = p[13],
+          orderRows = p[14], orderItemRows = p[15],
+          soRows = p[16], soLineRows = p[17];
       var fg = FG();
       /* warehouses + employees */
       var roleMap = { WAREHOUSE_EMPLOYEE: 'WORKER', SUPERVISOR: 'SUPERVISOR', MANAGER: 'MANAGER', ADMIN: 'ADMIN' };
       if (warehouses.length) {
-        DB.data.warehouses = warehouses.map(function (w) { return { id: w.id, name: w.name }; });
+        DB.data.warehouses = warehouses.map(function (w) {
+          return { id: w.id, name: w.name, timezone: w.timezone || 'America/New_York' };
+        });
         if (!DB.data.currentWarehouse) DB.data.currentWarehouse = wh;
       }
       if (users.length) {
@@ -1033,6 +1529,10 @@ var SharedRepo = {
       });
       fg.discrepancies = discRows.map(Mappers.rowToDiscrepancy);
       fg.auditEvents = auditRows;
+      /* Run 6: commercial layer joins the local mirror. */
+      fg.orders = (orderRows || []).map(function (r) { return Mappers.rowToOrder(r, orderItemRows); });
+      fg.salesOrders = (soRows || []).map(function (r) { return Mappers.rowToSalesOrder(r, soLineRows); });
+      migrateFloorguardV4toV5(); /* ensure seq counters exist on the mirror */
       /* Run 5: work-order audit rows join the local WO activity feed so
          holds, notes, assignments, and completions from other devices
          appear on job detail after a refresh. */
@@ -1233,7 +1733,14 @@ var SERVICE_METHODS = [
   /* Run 5: scheduled jobs / daily warehouse queue */
   'getScheduledJobs', 'getJobsForDate', 'getMyScheduledJobs',
   'setJobHold', 'resumeJob', 'startWarehouseWork', 'assignEmployee',
-  'completeWarehouseWork', 'addWorkOrderNote'
+  'completeWarehouseWork', 'addWorkOrderNote',
+  /* Run 6: order + sales order foundation (+ Run 6 §0 reopen) */
+  'reopenWarehouseWork',
+  'createOrder', 'getOrder', 'updateOrderHeader', 'addOrderItem',
+  'updateOrderItem', 'removeOrderItem', 'getDraftOrders',
+  'getRecentSubmittedOrders', 'markOrderReady', 'submitOrder', 'deleteOrder',
+  'getSalesOrders', 'getSalesOrder', 'releaseSalesOrderLine',
+  'holdSalesOrder', 'resumeSalesOrder', 'cancelSalesOrder'
 ];
 var Repository = {
   mode: 'local',

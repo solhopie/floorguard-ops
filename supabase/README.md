@@ -10,7 +10,7 @@ later without touching UI code.
 FloorGuard Ops (GitHub Pages, static frontend)
         │  PostgREST / Storage REST (anon key, RLS enforced)
         ▼
-Supabase project  ──►  PostgreSQL (migrations/ 0001–0006)
+Supabase project  ──►  PostgreSQL (migrations/ 0001–0007)
                   ──►  Storage bucket `history-cards` (private)
 ```
 
@@ -104,4 +104,17 @@ IDs so re-imports are safe. Nothing uploads without you pressing the button.
   `work_orders` (priority, scheduled_time, on_hold/hold_reason/hold_at/
   hold_by, warehouse_completed_at/by). Readiness stays client-derived;
   work-order audit goes to `audit_events` with entity_type='work_order'.
-* `seed.sql` — demo warehouse, users, locations, rolls, work orders.
+* `migrations/0007_order_sales_order.sql` — Run 6: order → sales order
+  commercial chain. Tables `orders`, `order_items`, `sales_orders`,
+  `sales_order_lines` (all RLS-gated; draft editing is manager/admin,
+  reads are warehouse-scoped). Atomic RPCs: `submit_sales_order()` —
+  creates the sales order + all lines in one transaction, idempotent via
+  the `source_order_id` unique key (a retried submit returns the existing
+  sales order); `release_sales_order_line()` — creates exactly one work
+  order per sales-order line in one transaction, idempotent (a retried
+  release returns the existing work order), refuses held/cancelled sales
+  orders, and rolls the sales-order status up (OPEN → PARTIALLY_RELEASED
+  → RELEASED_TO_WAREHOUSE). Cancellation never deletes work orders.
+* `seed.sql` — demo warehouse, users, locations, rolls, work orders,
+  plus Run 6 fixtures (ORD-1000 submitted, ORD-1001 draft, SO-100245
+  with two lines).

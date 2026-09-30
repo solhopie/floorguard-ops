@@ -13,7 +13,9 @@ var TABLES = [
   'work_orders', 'work_order_material_lines', 'inventory_assignments',
   'cut_transactions', 'cycle_count_sessions', 'cycle_count_records',
   'history_events', 'documents', 'history_card_imports', 'discrepancies',
-  'audit_events'
+  'audit_events',
+  /* Run 6: commercial layer. */
+  'orders', 'order_items', 'sales_orders', 'sales_order_lines'
 ];
 
 function startDouble() {
@@ -193,6 +195,91 @@ function startDouble() {
     return { ok: true, record_id: recId, diff_in: diff, roll_version: roll.version };
   }
 
+  /* ---- Run 6: order -> sales order / line -> work order (atomic RPCs) ---- */
+  /* Idempotency: same order id or same line id never creates a duplicate. */
+  function rpcSubmitSalesOrder(b) {
+    var orders = state.tables.orders, items = state.tables.order_items;
+    var sos = state.tables.sales_orders, solines = state.tables.sales_order_lines;
+    var now = new Date().toISOString();
+    var o = orders.get(b.p_order_id);
+    if (!o) return errObj('ORDER_NOT_FOUND', 'Order does not exist.');
+    if (o.sales_order_id) {
+      var existing = sos.get(o.sales_order_id);
+      if (existing) return { ok: true, duplicate: true, sales_order_id: existing.id, number: existing.number };
+    }
+    if (o.status !== 'DRAFT' && o.status !== 'READY_FOR_REVIEW')
+      return errObj('ORDER_NOT_SUBMITTABLE', 'Order is not in a submittable state.', { status: o.status });
+    var its = Array.from(items.values()).filter(function (i) { return i.order_id === o.id; })
+      .sort(function (a, b) { return (a.seq || 0) - (b.seq || 0); });
+    if (!its.length) return errObj('ORDER_HAS_NO_ITEMS', 'Order has no items.');
+    var soId = b.p_sales_order_id || nid('SO');
+    var so = { id: soId, number: b.p_number, source_order_id: o.id, warehouse_id: o.warehouse_id,
+      property: o.property, account: o.account, priority: o.priority,
+      requested_date: o.requested_date, scheduled_date: o.scheduled_date,
+      status: 'OPEN', created_by: o.created_by, submitted_by: b.p_submitted_by || null,
+      notes: o.notes, on_hold: false, hold_reason: null, hold_at: null, hold_by: null,
+      created_at: now, submitted_at: now, updated_at: now };
+    sos.set(soId, so);
+    its.forEach(function (it, n) {
+      var lid = nid('SOL');
+      solines.set(lid, { id: lid, sales_order_id: soId, seq: n + 1, source_item_id: it.id,
+        style: it.style, color: it.color, material_type: it.material_type, uom: it.uom,
+        width_in: it.width_in,
+        ordered_in: it.quantity_in, ordered_qty: it.quantity,
+        warehouse_qty_required: it.quantity_in != null ? it.quantity_in : it.quantity,
+        status: 'OPEN', work_order_id: null });
+    });
+    o.status = 'SUBMITTED'; o.sales_order_id = soId; o.submitted_at = now; o.updated_at = now;
+    state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: o.warehouse_id,
+      action: 'ORDER_SUBMITTED', entity_type: 'order', entity_id: o.id,
+      new_value: JSON.stringify({ sales_order_id: soId, number: so.number }), created_at: now });
+    return { ok: true, duplicate: false, sales_order_id: soId, number: so.number };
+  }
+  function rpcReleaseSalesOrderLine(b) {
+    var sos = state.tables.sales_orders, solines = state.tables.sales_order_lines;
+    var wos = state.tables.work_orders, wolines = state.tables.work_order_material_lines;
+    var now = new Date().toISOString();
+    var l = solines.get(b.p_line_id);
+    if (!l) return errObj('LINE_NOT_FOUND', 'Sales order line does not exist.');
+    var so = sos.get(l.sales_order_id);
+    if (!so) return errObj('SALES_ORDER_NOT_FOUND', 'Sales order does not exist.');
+    /* Mirrors the real RPC ordering: hold/cancel is checked before the
+       idempotent-release path (fail-closed). */
+    if (so.on_hold || so.status === 'CANCELLED')
+      return errObj('SALES_ORDER_NOT_RELEASABLE', 'Sales order is not releasable.');
+    if (l.status === 'RELEASED' && l.work_order_id) {
+      var existing = wos.get(l.work_order_id);
+      if (existing) return { ok: true, duplicate: true, work_order_id: existing.id, number: existing.number };
+    }
+    if (l.status !== 'OPEN')
+      return errObj('LINE_NOT_OPEN', 'Line is not open for release.', { status: l.status });
+    var woId = b.p_work_order_id || nid('WO');
+    var wo = { id: woId, number: b.p_wo_number, warehouse_id: so.warehouse_id,
+      property: so.property, account: so.account, status: 'OPEN',
+      assignment_status: 'UNASSIGNED', assignee_id: null,
+      scheduled_date: so.scheduled_date, scheduled_time: null, priority: so.priority,
+      on_hold: false, hold_reason: null, hold_at: null, hold_by: null,
+      warehouse_completed_at: null, warehouse_completed_by: null,
+      sales_order_id: so.id, sales_order_line_id: l.id,
+      notes: 'Generated from ' + so.number + ' line ' + l.seq + '.',
+      created_at: now };
+    wos.set(woId, wo);
+    var wlId = nid('WOL');
+    wolines.set(wlId, { id: wlId, work_order_id: woId, warehouse_id: so.warehouse_id,
+      style: b.p_style, color: b.p_color, material_type: b.p_material_type, uom: b.p_uom,
+      width_in: b.p_width_in, required_in: b.p_required_in, required_count: b.p_required_count });
+    l.status = 'RELEASED'; l.work_order_id = woId;
+    /* SO status rollup. */
+    var all = Array.from(solines.values()).filter(function (x) { return x.sales_order_id === so.id; });
+    var rel = all.filter(function (x) { return x.status === 'RELEASED'; }).length;
+    if (rel === all.length && all.length) so.status = 'RELEASED_TO_WAREHOUSE';
+    else if (rel > 0) so.status = 'PARTIALLY_RELEASED';
+    state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: so.warehouse_id,
+      action: 'SALES_ORDER_LINE_RELEASED', entity_type: 'sales_order', entity_id: so.id,
+      related_work_order_id: woId, new_value: JSON.stringify({ line_id: l.id }), created_at: now });
+    return { ok: true, duplicate: false, work_order_id: woId, number: wo.number };
+  }
+
   var server = http.createServer(function (req, res) {
     var parsed = url.parse(req.url, true);
     var p = parsed.path;
@@ -229,6 +316,12 @@ function startDouble() {
           if (!state.storage[key]) return send(res, 404, { message: 'not found' });
           return send(res, 200, state.storage[key], 'image/jpeg');
         }
+        if (req.method === 'DELETE') {
+          if (!authed(req)) return send(res, 401, { code: 'PGRST301', message: 'auth required' });
+          var delMatched = applyFilters(Array.from(table.values()), parsed.query);
+          delMatched.forEach(function (row) { table.delete(row.id); });
+          return send(res, 200, delMatched);
+        }
         return send(res, 405, { message: 'method not allowed' });
       }
 
@@ -240,6 +333,8 @@ function startDouble() {
         if (rm[1] === 'record_cut') out = rpcRecordCut(body || {});
         else if (rm[1] === 'reserve_inventory') out = rpcReserveInventory(body || {});
         else if (rm[1] === 'record_cycle_count') out = rpcRecordCycleCount(body || {});
+        else if (rm[1] === 'submit_sales_order') out = rpcSubmitSalesOrder(body || {});
+        else if (rm[1] === 'release_sales_order_line') out = rpcReleaseSalesOrderLine(body || {});
         else return send(res, 404, { message: 'unknown rpc' });
         return send(res, 200, out);
       }
@@ -264,10 +359,12 @@ function startDouble() {
         if (req.method === 'PATCH') {
           if (!authed(req)) return send(res, 401, { code: 'PGRST301', message: 'auth required' });
           var matched = applyFilters(Array.from(table.values()), parsed.query);
-          var LEGAL = { RESERVED: ['RELEASED', 'CONSUMED'] };
+          /* Transition guard is assignment-specific; orders / sales orders /
+             work orders manage their own lifecycle server-side. */
+          var LEGAL = (tm[1] === 'inventory_assignments') ? { RESERVED: ['RELEASED', 'CONSUMED'] } : null;
           for (var i = 0; i < matched.length; i++) {
             var row = matched[i];
-            if (body && body.status && row.status && body.status !== row.status) {
+            if (body && body.status && row.status && body.status !== row.status && LEGAL) {
               var legal = LEGAL[row.status] || [];
               if (legal.indexOf(body.status) < 0)
                 return send(res, 400, { message: 'Illegal assignment transition ' + row.status + ' -> ' + body.status });
