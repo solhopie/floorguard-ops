@@ -25,7 +25,7 @@ function daypart() {
   return 'evening';
 }
 
-var APP_VERSION = '0.3.0';
+var APP_VERSION = '0.4.0';
 
 /* ---------------- data layer ----------------
    One localStorage key, schema version, per-module namespaces.
@@ -389,7 +389,10 @@ function assignEventsForWO(woId) {
    - MISMATCH / INCOMPLETE material data: supervisor approval required.
    - OVER-RESERVED: supervisor approval required.
    - Unknown balance (discovered, never measured): supervisor approval. */
-function assignInventory(o) {
+/* Validation shared by local mode and SharedFlow (shared mode): the same
+   business rules — compatibility, supervisor gates, over-reservation —
+   apply no matter which provider persists the reservation. */
+function validateAssignInput(o) {
   var wo = woById(o.woId);
   if (!wo) return { ok: false, err: 'WORK ORDER NOT FOUND' };
   var line = lineById(wo, o.lineId);
@@ -403,7 +406,6 @@ function assignInventory(o) {
   var compat = checkCompatibility(roll, line);
   var bal = assignableBalance(roll);
   var ov = overReserved(roll.id, reservedIn);
-  var sup = isSupervisorRole(employee);
   var mismatchBy = o.mismatchApprovedBy || null;
   var overBy = o.overApprovedBy || null;
   if ((compat.verdict === 'MISMATCH' || compat.verdict === 'INCOMPLETE') &&
@@ -413,6 +415,18 @@ function assignInventory(o) {
     return { ok: false, err: 'BALANCE UNKNOWN — SUPERVISOR APPROVAL REQUIRED' };
   if (ov.over && !(overBy && isSupervisorRole(overBy)))
     return { ok: false, err: 'OVER-RESERVED — SUPERVISOR APPROVAL REQUIRED', over: ov };
+  return {
+    ok: true, wo: wo, line: line, roll: roll, employee: employee,
+    reservedIn: reservedIn, compat: compat, bal: bal, over: ov,
+    mismatchBy: mismatchBy, overBy: overBy, discoveredRoll: isDiscoveredRoll(roll)
+  };
+}
+function assignInventory(o) {
+  var v = validateAssignInput(o);
+  if (!v.ok) return v;
+  var wo = v.wo, line = v.line, roll = v.roll, employee = v.employee,
+      reservedIn = v.reservedIn, compat = v.compat, ov = v.over,
+      mismatchBy = v.mismatchBy, overBy = v.overBy;
   var now = new Date().toISOString();
   var rec = {
     id: aiSeq(), workOrderId: wo.id, lineId: line.id, rollId: roll.id,
@@ -483,6 +497,40 @@ function consumeAssignment(assignId, o) {
   });
   DB.save();
   return { ok: true, rec: rec };
+}
+/* ---------------- Run 4: data provider dispatch ----------------
+   In LOCAL DEMO mode these resolve through the synchronous local
+   functions above (zero behavior change). In SHARED PILOT mode they go
+   through SharedFlow: validate locally -> atomic backend RPC -> apply the
+   authoritative result to the in-memory store. Always returns a Promise. */
+function dataMode() {
+  return (typeof Repository !== 'undefined' && Repository.mode) || 'local';
+}
+function assignInventoryAsync(o) {
+  if (dataMode() === 'shared' && typeof SharedFlow !== 'undefined') return SharedFlow.assignInventory(o);
+  return Promise.resolve(assignInventory(o));
+}
+function releaseAssignmentAsync(assignId, by) {
+  if (dataMode() === 'shared' && typeof SharedFlow !== 'undefined') return SharedFlow.releaseAssignment(assignId, by);
+  return Promise.resolve(releaseAssignment(assignId, by));
+}
+function recordCutAsync(opts) {
+  if (dataMode() === 'shared' && typeof SharedFlow !== 'undefined') return SharedFlow.recordCut(opts);
+  return Promise.resolve(CutService.recordCut(opts));
+}
+/* Sync-indicator DOM hook (repository.js Sync -> topbar dot). Safe to call
+   when repository.js is not loaded (Run 1-3 tests): it no-ops. */
+function updateSyncIndicator() {
+  var el = document.getElementById('sync');
+  if (!el) return;
+  var s = (typeof Sync !== 'undefined') ? Sync.state : 'SYNCED';
+  var mode = dataMode();
+  el.className = 'sync s-' + s.toLowerCase().replace('_', '-');
+  el.title = (mode === 'shared' ? 'Shared Pilot' : 'Local Demo') + ' · ' +
+    ({ SYNCED: 'Synced', SYNCING: 'Syncing…', OFFLINE: 'Offline — changes stay on this device', 'SYNC_ERROR': 'Sync error — tap Settings to retry' }[s] || s);
+}
+if (typeof Sync !== 'undefined' && Sync.onChange) {
+  Sync.onChange(function () { updateSyncIndicator(); });
 }
 /* DISCOVER ROLL inside the assign flow: same discovered-roll record the
    Free Run flow creates — one shared architecture, no second database. */
@@ -738,6 +786,7 @@ function render() {
   $('#view').innerHTML = s.html;
   updateTopbar(r);
   markActiveNav(r);
+  updateSyncIndicator();
   if (s.mount) s.mount();
   if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo(0, 0);
 }
@@ -906,8 +955,35 @@ Screens.settings = function () {
       '<input type="text" id="set-newname" autocomplete="off" placeholder="Name">' +
       '<button class="btn btn-primary" type="submit">ADD EMPLOYEE</button>' +
       '</form></div>' +
+      '<div class="card"><h2>Data mode</h2>' +
+      '<div class="kv"><span class="k">Mode</span><span class="v" id="dm-mode">&mdash;</span></div>' +
+      '<div class="kv"><span class="k">Sync</span><span class="v" id="dm-sync">&mdash;</span></div>' +
+      '<div class="kv" id="dm-sessionrow" hidden><span class="k">Shared sign-in</span><span class="v" id="dm-session">&mdash;</span></div>' +
+      '<div class="btn-row"><button class="btn" id="dm-local">LOCAL DEMO</button>' +
+      '<button class="btn" id="dm-shared">SHARED PILOT</button></div>' +
+      '<div id="dm-sharedcfg" hidden>' +
+      '<div class="field"><label class="label" for="dm-url">SUPABASE URL</label>' +
+      '<input class="input mono" id="dm-url" autocomplete="off" placeholder="https://xyzcompany.supabase.co"></div>' +
+      '<div class="field"><label class="label" for="dm-key">SUPABASE ANON KEY</label>' +
+      '<input class="input mono" id="dm-key" type="password" autocomplete="off" placeholder=""></div>' +
+      '<div class="field"><label class="label" for="dm-email">EMPLOYEE EMAIL (shared sign-in)</label>' +
+      '<input class="input" id="dm-email" autocomplete="off" autocapitalize="none" placeholder="you@warehouse.com"></div>' +
+      '<div class="field"><label class="label" for="dm-pass">PASSWORD</label>' +
+      '<input class="input" id="dm-pass" type="password" autocomplete="off" placeholder=""></div>' +
+      '<div class="btn-row"><button class="btn btn-primary" id="dm-signin">SIGN IN</button>' +
+      '<button class="btn" id="dm-signout">SIGN OUT</button></div>' +
+      '<div class="btn-row"><button class="btn" id="dm-save">SAVE SETTINGS</button>' +
+      '<button class="btn" id="dm-refresh">REFRESH NOW</button></div>' +
+      '<button class="btn" id="dm-export">EXPORT LOCAL DATA</button>' +
+      '<button class="btn" id="dm-import">IMPORT INTO SHARED BACKEND</button>' +
+      '<p class="hint">The anon key is public by design; never paste a service-role key here. ' +
+      'Stored settings stay on this device. Import never overwrites existing shared records &mdash; ' +
+      'already-imported IDs are skipped.</p>' +
+      '</div>' +
+      '<div class="err" id="dm-err" hidden></div>' +
+      '</div>' +
       '<div class="card"><h2>About</h2>' +
-      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 3)</span></div>' +
+      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 4)</span></div>' +
       '<div class="kv"><span class="k">Storage key</span><span class="mono">' + esc(DB.KEY) + '</span></div>' +
       '<div class="kv"><span class="k">Schema</span><span class="num">v' + DB.SCHEMA + '</span></div>' +
       '</div>' +
@@ -936,6 +1012,103 @@ Screens.settings = function () {
           onOk: function () { DB.reset(); go('signin'); }
         });
       };
+      /* ---- Run 4: Data mode ---- */
+      if (typeof Repository !== 'undefined') {
+        var dmErr = function (m) { var e = $('#dm-err'); e.innerHTML = m; e.hidden = false; };
+        var dmClearErr = function () { var e = $('#dm-err'); e.hidden = true; };
+        var dmPaint = function () {
+          var c = Repository.config;
+          $('#dm-mode').textContent = Repository.mode === 'shared' ? 'SHARED PILOT' : 'LOCAL DEMO';
+          $('#dm-sync').textContent = (typeof Sync !== 'undefined') ? Sync.state : '—';
+          var sess = Repository.session();
+          $('#dm-sessionrow').hidden = !(sess && sess.email);
+          if (sess && sess.email) $('#dm-session').textContent = sess.email;
+          $('#dm-sharedcfg').hidden = Repository.mode !== 'shared';
+          if ($('#dm-url') && !$('#dm-url').value) $('#dm-url').value = c.supabaseUrl || '';
+          if ($('#dm-key')) $('#dm-key').placeholder = c.supabaseAnonKey ? '•••••••• (saved)' : '';
+          if ($('#dm-email') && !$('#dm-email').value) $('#dm-email').value = sess ? (sess.email || '') : '';
+          updateSyncIndicator();
+        };
+        $('#dm-local').onclick = function () {
+          dmClearErr();
+          Repository.saveConfig({ dataProvider: 'local' });
+          dmPaint();
+          toast('Local Demo mode');
+          render();
+        };
+        $('#dm-shared').onclick = function () {
+          dmClearErr();
+          var mode = Repository.saveConfig({ dataProvider: 'shared' });
+          dmPaint();
+          if (mode !== 'shared') dmErr('Enter the Supabase URL and anon key, then SAVE SETTINGS to enable Shared Pilot.');
+          else toast('Shared Pilot mode');
+          render();
+        };
+        $('#dm-save').onclick = function () {
+          dmClearErr();
+          var key = $('#dm-key').value.trim();
+          var patch = { dataProvider: 'shared', supabaseUrl: $('#dm-url').value.trim() };
+          if (key) patch.supabaseAnonKey = key; /* leave the stored key untouched when the field is blank */
+          var mode = Repository.saveConfig(patch);
+          $('#dm-key').value = '';
+          dmPaint();
+          if (mode !== 'shared') dmErr('Enter both the Supabase URL and the anon key to enable Shared Pilot.');
+          else { toast('Shared settings saved'); render(); }
+        };
+        $('#dm-signin').onclick = function () {
+          dmClearErr();
+          var em = $('#dm-email').value.trim(), pw = $('#dm-pass').value;
+          if (!em || !pw) { dmErr('Enter the employee email and password.'); return; }
+          Repository.signIn(em, pw).then(function () {
+            $('#dm-pass').value = '';
+            dmPaint(); toast('Signed in for shared writes');
+          }).catch(function (err) {
+            dmErr(esc(err && err.message ? err.message : 'Sign-in failed.'));
+          });
+        };
+        $('#dm-signout').onclick = function () {
+          dmClearErr();
+          Repository.signOut().then(function () { dmPaint(); toast('Signed out of shared backend'); })
+            .catch(function (err) { dmErr(esc(err && err.message ? err.message : 'Sign-out failed.')); });
+        };
+        $('#dm-refresh').onclick = function () {
+          dmClearErr();
+          Repository.refresh().then(function () { dmPaint(); toast('Refreshed from shared backend'); render(); })
+            .catch(function (err) { dmErr(esc(err && err.message ? err.message : 'Refresh failed.')); });
+        };
+        $('#dm-export').onclick = function () {
+          dmClearErr();
+          var snap = Repository.exportLocal();
+          var blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' });
+          var a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'floorguard-local-export.json';
+          document.body.appendChild(a); a.click();
+          setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+          toast('Local data exported');
+        };
+        $('#dm-import').onclick = function () {
+          dmClearErr();
+          showConfirm({
+            title: 'Import local data into the shared backend?',
+            body: 'Uploads this device\u2019s local records into the shared database. Existing shared records are never overwritten — already-imported IDs are skipped. Sign in first.',
+            okLabel: 'IMPORT'
+          }).then(function (ok) {
+            if (!ok) return;
+            var snap = Repository.exportLocal();
+            Repository.importShared(snap).then(function (r) {
+              var s = (r && r.summary) || {};
+              toast('Imported: ' + (s.rolls || 0) + ' rolls, ' + (s.cuts || 0) + ' cuts, ' +
+                (s.assignments || 0) + ' assignments' +
+                (s.skipped ? ' (' + s.skipped + ' already present — skipped)' : ''));
+              dmPaint(); render();
+            }).catch(function (err) {
+              dmErr(esc(err && err.message ? err.message : 'Import failed.'));
+            });
+          });
+        };
+        dmPaint();
+      }
     }
   };
 };
@@ -1739,16 +1912,37 @@ Screens['assign-inventory/assign'] = function (param) {
           }
           supName = DB.data.currentEmployee;
         }
-        var res = assignInventory({
+        var res2 = {
           woId: w.id, lineId: line.id, rollId: roll.id, reservedIn: reservedIn,
           employee: DB.data.currentEmployee,
           mismatchApprovedBy: (compat.verdict !== 'MATCH' || bal == null) ? supName : null,
-          overApprovedBy: ov.over ? supName : null
+          overApprovedBy: ov.over ? supName : null,
+          /* Stable idempotency key for this assignment intent: a double-tap
+             or a retried submit replays the same reservation, never a new one. */
+          clientRequestId: AI.reqId || (AI.reqId = rid('AR'))
+        };
+        assignInventoryAsync(res2).then(function (res) {
+          if (!res.ok) { var e2 = $('#ai-err'); e2.textContent = res.err; e2.hidden = false; bad(); return; }
+          good();
+          AI.reqId = null;
+          AI.assignId = res.rec.id; AI.assignRec = res.rec; AI.phase = 'done';
+          renderBody();
+        }).catch(function (err) {
+          bad();
+          var e3 = $('#ai-err');
+          if (err && err.code === 'OFFLINE') {
+            e3.textContent = 'OFFLINE — RESERVATION NOT SYNCED. Reconnect and try again.';
+          } else if (err && err.code === 'ROLL_VERSION_CONFLICT') {
+            e3.innerHTML = 'ROLL UPDATED BY ANOTHER DEVICE. <button class="btn" id="ai-ref2">REFRESH</button>';
+            var rb2 = $('#ai-ref2');
+            if (rb2) rb2.onclick = function () {
+              Repository.refresh().then(function () { renderBody(); }).catch(function () { renderBody(); });
+            };
+          } else {
+            e3.textContent = (err && err.message) || 'Assignment failed.';
+          }
+          e3.hidden = false;
         });
-        if (!res.ok) { var e2 = $('#ai-err'); e2.textContent = res.err; e2.hidden = false; bad(); return; }
-        good();
-        AI.assignId = res.rec.id; AI.assignRec = res.rec; AI.phase = 'done';
-        renderBody();
       };
     }
     function doneHtml() {
@@ -1842,9 +2036,15 @@ Screens['assign-inventory/a'] = function (param) {
         body: 'Releases ' + fmtLen(rec.reservedIn) + ' reserved on roll ' + rec.rollId + '. The record is kept as history.',
         okLabel: 'RELEASE' }).then(function (ok) {
         if (!ok) return;
-        var res = releaseAssignment(rec.id, DB.data.currentEmployee);
-        if (!res.ok) { bad(); return; }
-        good(); render();
+        releaseAssignmentAsync(rec.id, DB.data.currentEmployee).then(function (res) {
+          if (!res.ok) { bad(); toast(res.err); return; }
+          good(); render();
+        }).catch(function (err) {
+          bad();
+          toast(err && err.code === 'OFFLINE'
+            ? 'OFFLINE — RELEASE NOT SYNCED. Reconnect and try again.'
+            : ((err && err.message) || 'Release failed.'));
+        });
       });
     };
   }};
@@ -1960,6 +2160,10 @@ function systemBalance(rollId) {
   var roll = rollById(rollId);
   if (!roll) return 0;
   if (roll.testBalanceIn != null) return roll.testBalanceIn; /* TEMPORARY PILOT: Real Floors API replaces this */
+  /* Run 4 shared mode: the backend is the source of truth — the authoritative
+     balance hydrated from PostgreSQL, not a local re-derivation. */
+  if (typeof Repository !== 'undefined' && Repository.mode === 'shared' && roll.sharedExpectedIn != null)
+    return roll.sharedExpectedIn;
   var cuts = FG().cuts.filter(function (c) { return c.rollId === rollId; });
   var used = cuts.reduce(function (s, c) { return s + c.inches; }, 0);
   return roll.beginningIn - used;
@@ -2649,6 +2853,29 @@ function submitCount(flagged) {
   var sys = systemBalance(roll.id);
   var diff = S.physicalIn - sys;
   var status = computeStatus(roll, S.scannedLoc, S.physicalIn, flagged);
+  /* Run 4 shared mode: atomic backend write (record + MB stamp + history +
+     audit), then quiet refresh so the authoritative record shows up. */
+  if (dataMode() === 'shared' && typeof SharedRepo !== 'undefined') {
+    sharedRecordCount({
+      rollId: roll.id, scannedLocation: S.scannedLoc, expectedIn: sys,
+      physicalIn: S.physicalIn, status: status,
+      employee: DB.data.currentEmployee, note: flagged ? 'Flagged for review' : null
+    }).then(function (r) {
+      S = null;
+      lastSavedId = r.recordId;
+      if (status === 'MATCH') good(); else if (status === 'NEEDS_REVIEW') warn(); else bad();
+      go('count/standard/saved', r.recordId);
+    }).catch(function (err) {
+      bad();
+      countOffline(err, { kind: 'count', payload: {
+        rollId: roll.id, scannedLocation: S.scannedLoc, expectedIn: sys,
+        physicalIn: S.physicalIn, status: status,
+        employee: DB.data.currentEmployee, note: flagged ? 'Flagged for review' : null,
+        warehouseId: Repository.config.warehouseId
+      }});
+    });
+    return;
+  }
   var now = new Date();
   var rec = {
     id: 'C' + Date.now().toString(36).toUpperCase(),
@@ -2671,6 +2898,29 @@ function submitCount(flagged) {
   lastSavedId = rec.id;
   if (status === 'MATCH') good(); else if (status === 'NEEDS_REVIEW') warn(); else bad();
   go('count/standard/saved', rec.id);
+}
+
+/* Run 4: shared-mode count write + refresh, resolving the authoritative
+   record id. Discovered rolls are upserted first (FK-safe). */
+function sharedRecordCount(o) {
+  var ensure = (o.discovered && o.roll && typeof SharedRepo !== 'undefined')
+    ? SharedRepo.ensureRoll(o.roll) : Promise.resolve();
+  return ensure.then(function () {
+    return SharedRepo.recordCycleCount(o);
+  }).then(function (r) {
+    return Repository.refresh({ quiet: true }).then(function () { return r; });
+  });
+}
+/* Run 4: offline count handling — queue for explicit retry, never pretend
+   the backend accepted it. */
+function countOffline(err, outboxItem) {
+  if (err && (err.code === 'OFFLINE' || err.code === 'NETWORK') && typeof Sync !== 'undefined') {
+    Sync.queue(outboxItem);
+    Sync.set('OFFLINE');
+    toast('OFFLINE — COUNT NOT SYNCED. Reconnect and retry from Settings.');
+  } else {
+    toast((err && err.message) || 'Count failed.');
+  }
 }
 
 /* ---------------- CUT TRANSACTION MODE -------------------------------------------
@@ -2847,28 +3097,104 @@ Screens['cut/entry'] = function () {
       var woId = $('#wo').value;
       var wo = woId ? woById(woId) : null;
       var orderVal = wo ? wo.number : $('#order').value;
-      var res = CutService.recordCut({
+      var cutOpts = {
         rollId: roll.id, order: orderVal,
         cutIn: (ft === '' && inch === '') ? 0 : cutIn,
-        employee: DB.data.currentEmployee, location: roll.expectedLocation
+        employee: DB.data.currentEmployee, location: roll.expectedLocation,
+        assignmentId: C.assignId || null, woId: wo ? wo.id : null
+      };
+      var screenBal = systemBalance(roll.id); /* for the conflict panel */
+      if (dataMode() === 'local') {
+        /* Synchronous local path — byte-for-byte Run 1–3 behavior. */
+        var res = CutService.recordCut(cutOpts);
+        if (!res.ok) { bad(); var e = $('#cuterr'); e.textContent = res.err; e.hidden = false; return; }
+        /* Run 3: the cut consumes the reservation it was assigned for. */
+        if (C.assignId) {
+          consumeAssignment(C.assignId, { cutId: res.rec.id, actualCutIn: cutIn, by: DB.data.currentEmployee });
+        }
+        if (wo) {
+          /* WORK ORDER -> ASSIGN INVENTORY -> CUT: the cut roll becomes the
+             order's roll and the order moves to IN_PROGRESS. */
+          wo.rollId = roll.id;
+          if (wo.opStatus === 'OPEN') wo.opStatus = 'IN_PROGRESS';
+          DB.save();
+        }
+        good();
+        go('cut/saved', res.rec.id);
+        return;
+      }
+      /* Shared mode: atomic backend RPC; the authoritative result is applied
+         to the in-memory store by SharedFlow. */
+      SharedFlow.recordCut(cutOpts).then(function (r) {
+        good();
+        go('cut/saved', r.rec.id);
+      }).catch(function (err) {
+        bad();
+        cutSaveError(err, { roll: roll, screenBal: screenBal, cutIn: cutIn, cutOpts: cutOpts });
       });
-      if (!res.ok) { bad(); var e = $('#cuterr'); e.textContent = res.err; e.hidden = false; return; }
-      /* Run 3: the cut consumes the reservation it was assigned for. */
-      if (C.assignId) {
-        consumeAssignment(C.assignId, { cutId: res.rec.id, actualCutIn: cutIn, by: DB.data.currentEmployee });
-      }
-      if (wo) {
-        /* WORK ORDER -> ASSIGN INVENTORY -> CUT: the cut roll becomes the
-           order's roll and the order moves to IN_PROGRESS. */
-        wo.rollId = roll.id;
-        if (wo.opStatus === 'OPEN') wo.opStatus = 'IN_PROGRESS';
-        DB.save();
-      }
-      good();
-      go('cut/saved', res.rec.id);
     };
   }};
 };
+
+/* Run 4: shared-mode cut failure panels. Never silently pretends the
+   backend accepted a cut it did not. */
+function cutSaveError(err, ctx) {
+  var box = $('#cuterr');
+  var code = err && err.code;
+  if (code === 'OFFLINE' || code === 'NETWORK') {
+    /* Queue for explicit retry — the idempotency key makes retry safe. */
+    if (typeof Sync !== 'undefined') {
+      Sync.queue({ kind: 'cut', payload: ctx.cutOpts });
+      Sync.set('OFFLINE');
+    }
+    box.hidden = false;
+    box.innerHTML = '<b>OFFLINE &mdash; CUT NOT SYNCED</b><br>' +
+      'The cut was <b>not</b> recorded. It is queued on this device.<br>' +
+      '<button class="btn btn-primary" id="cut-retry" style="margin-top:10px">RETRY SYNC</button>';
+    var rb = $('#cut-retry');
+    if (rb) rb.onclick = function () { retryOutboxCuts(); };
+    return;
+  }
+  if (code === 'ROLL_VERSION_CONFLICT' && err.data) {
+    var cur = err.data.currentBalanceIn;
+    box.hidden = false;
+    box.innerHTML = '<b>ROLL UPDATED BY ANOTHER DEVICE</b><br>' +
+      'Previous Screen Balance: <b class="num">' + fmtLen(ctx.screenBal) + '</b><br>' +
+      'Current Balance: <b class="num">' + fmtLen(cur) + '</b><br>' +
+      '<button class="btn btn-primary" id="cut-refresh" style="margin-top:10px">REFRESH AND CONTINUE</button>';
+    var fb = $('#cut-refresh');
+    if (fb) fb.onclick = function () {
+      Repository.refresh().then(function () { render(); }).catch(function () { render(); });
+    };
+    return;
+  }
+  box.hidden = false;
+  box.textContent = (err && err.message) || 'Cut failed.';
+}
+/* Explicit retry of queued cuts (shared mode). Each carries its idempotency
+   key: a retry can resume, never duplicate. */
+function retryOutboxCuts() {
+  if (typeof Sync === 'undefined') return;
+  var q = Sync.outbox().filter(function (i) { return i.kind === 'cut'; });
+  if (!q.length) { toast('Nothing queued.'); return; }
+  Sync.set('SYNCING');
+  var chain = Promise.resolve(), done = 0, failed = 0;
+  q.forEach(function (item) {
+    chain = chain.then(function () {
+      return SharedFlow.recordCut(item.payload).then(function () {
+        Sync.dequeue(item.id); done++;
+      }).catch(function (err) {
+        failed++;
+        if (err && err.code === 'ROLL_VERSION_CONFLICT') Sync.dequeue(item.id); /* re-enter with a fresh balance */
+      });
+    });
+  });
+  chain.then(function () {
+    Sync.set(failed ? 'SYNC_ERROR' : 'SYNCED');
+    toast(done + ' cut(s) synced' + (failed ? ', ' + failed + ' need attention' : ''));
+    render();
+  });
+}
 
 Screens['cut/saved'] = function (param) {
   var rec = FG().cuts.filter(function (c) { return c.id === param; })[0];
@@ -3537,6 +3863,32 @@ Screens['count/free/balance'] = function () {
 function saveFreeCount(ft, inch) {
   var s = F.scan;
   var physicalIn = Math.round(ft * 12 + inch);
+  /* Run 4 shared mode: atomic backend write (+ensureRoll for discoveries),
+     then refresh. */
+  if (dataMode() === 'shared' && typeof SharedRepo !== 'undefined') {
+    var sRoll = s.known ? rollByBarcode(s.rollId) : findDiscovered(s.rollId);
+    sharedRecordCount({
+      rollId: s.rollId, scannedLocation: F.activeLoc,
+      expectedIn: (s.expectedIn != null ? s.expectedIn : 0),
+      physicalIn: physicalIn, status: 'COLLECTED', employee: DB.data.currentEmployee,
+      note: (s.flagNote || '').trim() || null, discovered: !s.known, roll: sRoll
+    }).then(function () {
+      good();
+      F.lastMsg = '✓ COLLECTED — ' + s.rollId + ' ' + fmtLen(physicalIn);
+      F.scan = null;
+      go('count/free/scan'); /* straight back to the scanner — never home */
+    }).catch(function (err) {
+      bad();
+      countOffline(err, { kind: 'count', payload: {
+        rollId: s.rollId, scannedLocation: F.activeLoc,
+        expectedIn: (s.expectedIn != null ? s.expectedIn : 0),
+        physicalIn: physicalIn, status: 'COLLECTED', employee: DB.data.currentEmployee,
+        note: (s.flagNote || '').trim() || null, discovered: !s.known,
+        warehouseId: Repository.config.warehouseId
+      }});
+    });
+    return;
+  }
   var now = new Date();
   var rec = {
     id: 'FC' + now.getTime().toString(36).toUpperCase(),
@@ -4191,6 +4543,29 @@ Screens['roll/doc/review'] = function () {
 };
 
 function saveDocument() {
+  /* Run 4 shared mode: private storage upload + metadata rows (atomic),
+     then refresh so the authoritative doc shows up. */
+  if (dataMode() === 'shared' && typeof SharedRepo !== 'undefined') {
+    SharedRepo.uploadHistoryCard({
+      rollId: D.rollId, imageDataUrl: D.image, mimeType: 'image/jpeg',
+      employee: DB.data.currentEmployee, location: D.location || null,
+      sessionId: (typeof F !== 'undefined' && F && F.id && !F.endedAt) ? F.id : null
+    }).then(function (r) {
+      return Repository.refresh({ quiet: true }).then(function () { return r; });
+    }).then(function (r) {
+      D.docId = r.docId; D.fresh = true;
+      D.image = null; D.thumb = null; D.saveError = '';
+      good();
+      go('doc', r.docId);
+    }).catch(function (err) {
+      bad();
+      D.saveError = (err && (err.code === 'OFFLINE' || err.code === 'NETWORK'))
+        ? 'OFFLINE — HISTORY CARD NOT SYNCED. Reconnect and tap USE PHOTO again.'
+        : ((err && err.message) || 'Upload failed. Tap USE PHOTO to retry.');
+      render();
+    });
+    return;
+  }
   var now = new Date();
   var rec = {
     id: 'D' + now.getTime().toString(36).toUpperCase(),
@@ -4241,7 +4616,9 @@ Screens['doc'] = function (param) {
     '<div class="step-head">ROLL DOCUMENT</div>' +
     '<h1 class="mono">HISTORY CARD #' + doc.num + '</h1>' +
     '<div class="card" style="text-align:center">' +
-      '<img src="' + doc.thumb + '" id="docimg" style="max-width:100%;border-radius:8px">' +
+      '<img id="docimg" style="max-width:100%;border-radius:8px"' +
+        (doc.thumb ? ' src="' + doc.thumb + '"' : ' alt="Loading history card…"') + '>' +
+      '<div class="hint" id="docloading"' + (doc.thumb ? ' hidden' : '') + '>Loading history card…</div>' +
       '<br><button class="btn" id="vieworig" style="margin-top:10px">&#128269; VIEW ORIGINAL</button>' +
     '</div>' +
     '<div class="card">' +
@@ -4260,8 +4637,20 @@ Screens['doc'] = function (param) {
     '<div id="docoverlay" class="doc-overlay" hidden><img id="docfull" alt="History card original"><div class="hint" style="color:#fff">Tap to close</div></div>' +
     '</div>';
   return { html: html, mount: function () {
+    /* Run 4 shared mode: the original lives in private storage; fetch it
+       into memory only (never into localStorage). */
+    if (!doc.thumb && !doc.image && dataMode() === 'shared' && doc.storagePath &&
+        typeof SharedRepo !== 'undefined') {
+      SharedRepo.downloadHistoryCard(doc.storagePath).then(function (url) {
+        doc._imgUrl = url; /* session-only */
+        var im = $('#docimg'); if (im) im.src = url;
+        var ld = $('#docloading'); if (ld) ld.hidden = true;
+      }).catch(function () {
+        var ld = $('#docloading'); if (ld) ld.textContent = 'Could not load the original.';
+      });
+    }
     $('#vieworig').onclick = function () {
-      $('#docfull').src = doc.image;
+      $('#docfull').src = doc._imgUrl || doc.image;
       $('#docoverlay').hidden = false;
     };
     $('#docoverlay').onclick = function () { $('#docoverlay').hidden = true; $('#docfull').removeAttribute('src'); };
@@ -4364,10 +4753,28 @@ Screens['doc/extract'] = function (param) {
     $('#xignore').onclick = function () { history.back(); };
     $('#xconfirm').onclick = function () {
       var now = new Date();
+      var fields = readExtractFields();
+      /* Run 4 shared mode: the import becomes a backend history event —
+         never a balance change. */
+      if (dataMode() === 'shared' && typeof SharedRepo !== 'undefined') {
+        SharedRepo.confirmHistoryImport({
+          docId: doc.id, rollId: doc.rollId, fields: fields,
+          employee: DB.data.currentEmployee, warehouseId: Repository.config.warehouseId
+        }).then(function () {
+          return Repository.refresh({ quiet: true });
+        }).then(function () {
+          good();
+          go('doc', doc.id);
+        }).catch(function (err) {
+          bad();
+          toast((err && err.message) || 'Import failed.');
+        });
+        return;
+      }
       doc.imports.push({
         id: 'X' + now.getTime().toString(36).toUpperCase(),
         docId: doc.id,
-        fields: readExtractFields(),
+        fields: fields,
         status: 'CONFIRMED',
         confirmedAt: now.toISOString(),
         confirmedBy: DB.data.currentEmployee
@@ -4580,6 +4987,27 @@ Screens['count/rapid/balance'] = function () {
       var physicalIn = Math.round(ft * 12 + inch);
       var diff = physicalIn - sys;
       var status = computeStatus(roll, R.activeLoc, physicalIn, false);
+      /* Run 4 shared mode: atomic backend write, then refresh. */
+      if (dataMode() === 'shared' && typeof SharedRepo !== 'undefined') {
+        sharedRecordCount({
+          rollId: roll.id, scannedLocation: R.activeLoc, expectedIn: sys,
+          physicalIn: physicalIn, status: status, employee: DB.data.currentEmployee
+        }).then(function (r) {
+          if (status === 'MATCH') good(); else bad();
+          var sym = status === 'MATCH' ? '✓' : (status === 'SHORT' ? '▼' : '▲');
+          R.lastMsg = { status: status, text: sym + ' ' + status + ' ' + fmtDiff(diff) + ' — ' + roll.id };
+          R.scan = null;
+          go('count/rapid/scan'); /* straight back to the scanner — never home */
+        }).catch(function (err) {
+          bad();
+          countOffline(err, { kind: 'count', payload: {
+            rollId: roll.id, scannedLocation: R.activeLoc, expectedIn: sys,
+            physicalIn: physicalIn, status: status, employee: DB.data.currentEmployee,
+            warehouseId: Repository.config.warehouseId
+          }});
+        });
+        return;
+      }
       var now = new Date();
       FG().counts.push({
         id: 'C' + Date.now().toString(36).toUpperCase(),
@@ -4727,13 +5155,30 @@ Screens['count/review'] = function () {
 /* ---------------- boot ---------------------------------------------------------- */
 document.addEventListener('DOMContentLoaded', function () {
   DB.load();
+  if (typeof Repository !== 'undefined') Repository.configure();
   render();
 });
 
 DB.load();
+if (typeof Repository !== 'undefined') Repository.configure();
 renderDrawer();
 wireShell();
+updateSyncIndicator();
 if (typeof window !== 'undefined' && window.addEventListener) {
   window.addEventListener('hashchange', render);
+  /* Shared mode: background refresh when returning to a page (debounced). */
+  var _navRefreshT = null;
+  window.addEventListener('hashchange', function () {
+    if (dataMode() !== 'shared') return;
+    if (_navRefreshT) clearTimeout(_navRefreshT);
+    _navRefreshT = setTimeout(function () {
+      Repository.refresh({ quiet: true }).catch(function () {});
+    }, 900);
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && dataMode() === 'shared') {
+      Repository.refresh({ quiet: true }).catch(function () {});
+    }
+  });
 }
 render();

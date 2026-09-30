@@ -45,6 +45,25 @@ FloorGuard Ops is the one app and the one codebase; the prototype is legacy/refe
 - Data: one localStorage key (`floorguard_ops_v1`), schema v2 (warehouse context + roles + shared FloorGuard store), integer-inch measurements, append-only cuts
 - Scanner: camera (BarcodeDetector &rarr; vendored ZXing fallback), hardware keyboard wedge, manual entry; `01` manufacturer-prefix stripping; real location codes
 
+## Run 4 — Shared Backend + Multi-Device Sync (v0.4.0)
+
+One shared dataset, multiple devices. The app gains a repository layer (`repository.js`) behind a `Repository` facade with two providers:
+
+- **Local Demo** (`DATA_PROVIDER=local`): the existing localStorage behavior, unchanged.
+- **Shared Pilot** (`DATA_PROVIDER=shared`): Supabase/PostgreSQL backend via PostgREST + RPC, configured in Settings &rarr; Data mode (Supabase URL + anon key, employee sign-in). No secrets in code; the service-role key never touches the frontend.
+
+PostgreSQL schema in `supabase/migrations/` (16 tables, RLS policies, seed): integer inches everywhere, `rolls.expected_in` as authoritative balance, `rolls.version` for optimistic concurrency, append-only cuts/counts/history/audit, private `history-cards` storage bucket, atomic RPCs `record_cut`, `reserve_inventory`, `record_cycle_count`.
+
+Key behaviors:
+
+- Cuts and reservations go through atomic RPCs — a stale device gets **ROLL UPDATED BY ANOTHER DEVICE** (previous screen balance vs. current backend balance + REFRESH AND CONTINUE) instead of overwriting.
+- Offline balance-changing transactions never pretend to succeed: **OFFLINE — CUT NOT SYNCED**, queued for explicit retry with idempotent request IDs.
+- Physical measurements stamp measured balance (MB) without moving trusted balances or invalidating other devices' cuts.
+- History-card originals live in private storage; confirmed extractions become history events only, never balance changes.
+- Local demo data is never auto-uploaded: Settings &rarr; EXPORT LOCAL DATA / IMPORT INTO SHARED BACKEND (explicit, idempotent, existing shared records are never overwritten).
+
+Without a configured Supabase project the app runs in Local Demo mode — the shared code paths are dormant until the owner provides the URL + anon key.
+
 ## Develop
 
 Open `index.html` in a browser, or serve the folder:
