@@ -320,10 +320,23 @@ function potentialAvailable(roll) {
   return (bal == null) ? null : bal - reservedOnRoll(roll.id);
 }
 function lineStatus(wo, line) {
-  var act = activeAssignments(wo.id, line.id);
-  if (!act.length) return 'NOT_ASSIGNED';
-  var tot = act.reduce(function (s, a) { return s + (a.reservedIn || 0); }, 0);
-  return tot >= (line.requiredIn || 0) ? 'ASSIGNED' : 'PARTIALLY_ASSIGNED';
+  var all = allAssignmentsForLine(wo.id, line.id);
+  var act = all.filter(function (a) { return a.status === AI_STATUS.RESERVED; });
+  if (act.length) {
+    var tot = act.reduce(function (s, a) { return s + (a.reservedIn || 0); }, 0);
+    return tot >= (line.requiredIn || 0) ? 'ASSIGNED' : 'PARTIALLY_ASSIGNED';
+  }
+  /* No active reservation, but the line was already cut for: the material
+     left the roll through a real cut transaction, so the line is fulfilled —
+     it must not fall back to NOT ASSIGNED and reappear as needing inventory. */
+  var cons = all.filter(function (a) { return a.status === AI_STATUS.CONSUMED; });
+  if (cons.length) {
+    var cut = cons.reduce(function (s, a) {
+      return s + (a.actualCutIn != null ? a.actualCutIn : (a.reservedIn || 0));
+    }, 0);
+    return cut >= (line.requiredIn || 0) ? 'COMPLETED' : 'PARTIALLY_ASSIGNED';
+  }
+  return 'NOT_ASSIGNED';
 }
 /* NOT ASSIGNED / PARTIALLY ASSIGNED / ASSIGNED against the material line. */
 function checkCompatibility(roll, line) {
@@ -361,7 +374,8 @@ function logAssignEvent(action, o) {
     id: aeSeq(), at: now,
     action: action, user: o.user || DB.data.currentEmployee,
     warehouse: o.warehouse || DB.data.currentWarehouse,
-    workOrderId: o.workOrderId || null, rollId: o.rollId || null,
+    workOrderId: o.workOrderId || null, lineId: o.lineId || null,
+    rollId: o.rollId || null,
     assignmentId: o.assignmentId || null, detail: o.detail || ''
   });
   DB.save();
@@ -415,18 +429,18 @@ function assignInventory(o) {
   };
   FG().inventoryAssignments.push(rec);
   logAssignEvent('INVENTORY_ASSIGNED', {
-    user: employee, workOrderId: wo.id, rollId: roll.id, assignmentId: rec.id,
+    user: employee, workOrderId: wo.id, lineId: line.id, rollId: roll.id, assignmentId: rec.id,
     detail: 'Roll ' + roll.id + ' → ' + wo.number + ' line ' + line.id +
       ', reserved ' + fmtLen(reservedIn) + (mismatchBy ? ' (material override: ' + mismatchBy + ')' : '') +
       (overBy ? ' (over-reservation: ' + overBy + ')' : '')
   });
   if (mismatchBy) logAssignEvent('MATERIAL_MISMATCH_OVERRIDE', {
-    user: mismatchBy, workOrderId: wo.id, rollId: roll.id, assignmentId: rec.id,
+    user: mismatchBy, workOrderId: wo.id, lineId: line.id, rollId: roll.id, assignmentId: rec.id,
     detail: 'Approved ' + compat.verdict + ': ' +
       compat.mismatches.map(function (m) { return m.field + ' roll=' + m.roll + ' line=' + m.line; }).join(', ')
   });
   if (overBy) logAssignEvent('OVER_RESERVATION_APPROVED', {
-    user: overBy, workOrderId: wo.id, rollId: roll.id, assignmentId: rec.id,
+    user: overBy, workOrderId: wo.id, lineId: line.id, rollId: roll.id, assignmentId: rec.id,
     detail: 'Total reserved ' + fmtLen(ov.total) + ' vs balance ' + fmtLen(ov.balance)
   });
   if (wo.opStatus === 'OPEN') wo.opStatus = 'IN_PROGRESS';
@@ -445,7 +459,8 @@ function releaseAssignment(assignId, by) {
   rec.releasedAt = new Date().toISOString();
   rec.releasedBy = who;
   logAssignEvent('INVENTORY_RELEASED', {
-    user: who, workOrderId: rec.workOrderId, rollId: rec.rollId, assignmentId: rec.id,
+    user: who, workOrderId: rec.workOrderId, lineId: rec.lineId,
+    rollId: rec.rollId, assignmentId: rec.id,
     detail: 'Released ' + fmtLen(rec.reservedIn) + ' reservation'
   });
   DB.save();
@@ -462,7 +477,8 @@ function consumeAssignment(assignId, o) {
   rec.cutId = o.cutId || null;
   rec.actualCutIn = (o.actualCutIn != null) ? Math.round(o.actualCutIn) : null;
   logAssignEvent('ASSIGNMENT_CONSUMED', {
-    user: rec.consumedBy, workOrderId: rec.workOrderId, rollId: rec.rollId, assignmentId: rec.id,
+    user: rec.consumedBy, workOrderId: rec.workOrderId, lineId: rec.lineId,
+    rollId: rec.rollId, assignmentId: rec.id,
     detail: 'Cut ' + fmtLen(rec.actualCutIn || 0) + (rec.cutId ? ' (' + rec.cutId + ')' : '')
   });
   DB.save();
@@ -1256,7 +1272,8 @@ var AIHUB = { tab: 'needs', q: '', emp: '', prop: '', mtype: '', date: '' };
 function aiLineStatusChip(st) {
   var map = { NOT_ASSIGNED: ['st-red', 'NOT ASSIGNED'],
     PARTIALLY_ASSIGNED: ['st-yellow', 'PARTIALLY ASSIGNED'],
-    ASSIGNED: ['st-green', 'ASSIGNED'] };
+    ASSIGNED: ['st-green', 'ASSIGNED'],
+    COMPLETED: ['st-green', 'COMPLETED'] };
   var m = map[st] || map.NOT_ASSIGNED;
   return '<span class="stchip ' + m[0] + '">' + m[1] + '</span>';
 }
@@ -1347,7 +1364,10 @@ Screens['assign-inventory'] = function () {
     if (AIHUB.prop && w.property !== AIHUB.prop) return;
     if (AIHUB.mtype && !(w.lines || []).some(function (l) { return l.materialType === AIHUB.mtype; })) return;
     if (!aiMatches(w, AIHUB.q)) return;
-    var openLines = (w.lines || []).filter(function (l) { return lineStatus(w, l) !== 'ASSIGNED'; });
+    var openLines = (w.lines || []).filter(function (l) {
+      var st = lineStatus(w, l);
+      return st === 'NOT_ASSIGNED' || st === 'PARTIALLY_ASSIGNED';
+    });
     if (!openLines.length) return;
     nNeeds++;
     needsRows += '<button class="rowbtn" data-wo="' + esc(w.id) + '">' +
@@ -1473,10 +1493,20 @@ Screens['assign-inventory/wo'] = function (param) {
           '<div class="rhead"><b class="mono">' + esc(a.rollId) + '</b> ' + aiAssignStatusChip(a.status) + '</div>' +
           '<div class="sub">Reserved <b class="num">' + fmtLen(a.reservedIn) + '</b> &middot; ' + esc(a.employee) +
           ' &middot; ' + fmtDT(a.at) + '</div></button>';
-      }).join('') : '<p class="hint">No inventory assigned yet.</p>') +
-      (st !== 'ASSIGNED'
-        ? '<button class="btn btn-primary btn-huge" data-assign="' + esc(l.id) + '">&#128205; ASSIGN ROLL</button>'
-        : '<button class="btn" data-assign="' + esc(l.id) + '">ASSIGN ANOTHER ROLL</button>') +
+      }).join('') : (st === 'COMPLETED'
+        ? '<p class="hint">Inventory assigned and cut for this line.</p>'
+        : '<p class="hint">No inventory assigned yet.</p>')) +
+      (hist.length ? '<div class="label" style="margin-top:8px">PAST ASSIGNMENTS</div>' + hist.map(function (a) {
+        return '<button class="rowbtn" data-a="' + esc(a.id) + '">' +
+          '<div class="rhead"><b class="mono">' + esc(a.rollId) + '</b> ' + aiAssignStatusChip(a.status) + '</div>' +
+          '<div class="sub">' + (a.status === AI_STATUS.CONSUMED
+            ? 'Cut <b class="num">' + fmtLen(a.actualCutIn != null ? a.actualCutIn : a.reservedIn) + '</b>'
+            : 'Released <b class="num">' + fmtLen(a.reservedIn) + '</b>') +
+          ' &middot; ' + esc(a.employee) + ' &middot; ' + fmtDT(a.at) + '</div></button>';
+      }).join('') : '') +
+      ((st === 'ASSIGNED' || st === 'COMPLETED')
+        ? '<button class="btn" data-assign="' + esc(l.id) + '">ASSIGN ANOTHER ROLL</button>'
+        : '<button class="btn btn-primary btn-huge" data-assign="' + esc(l.id) + '">&#128205; ASSIGN ROLL</button>') +
     '</div>';
   }).join('');
   var evts = assignEventsForWO(w.id);
@@ -1717,12 +1747,15 @@ Screens['assign-inventory/assign'] = function (param) {
         });
         if (!res.ok) { var e2 = $('#ai-err'); e2.textContent = res.err; e2.hidden = false; bad(); return; }
         good();
-        AI.assignId = res.rec.id; AI.phase = 'done';
+        AI.assignId = res.rec.id; AI.assignRec = res.rec; AI.phase = 'done';
         renderBody();
       };
     }
     function doneHtml() {
-      var rec = (FG().inventoryAssignments || []).filter(function (a) { return a.id === AI.assignId; })[0];
+      /* Prefer the record reference captured at creation; fall back to a
+         store lookup so a re-render can never show a phantom "not found". */
+      var rec = AI.assignRec ||
+        (FG().inventoryAssignments || []).filter(function (a) { return a.id === AI.assignId; })[0];
       if (!rec) return '<p class="hint">Assignment not found.</p>';
       return '<div class="ok-panel"><div class="big-ok">&#10003; INVENTORY ASSIGNED</div>' +
         '<div class="kv"><span class="k">Assignment</span><span class="v mono">' + esc(rec.id) + '</span></div>' +
@@ -1737,8 +1770,9 @@ Screens['assign-inventory/assign'] = function (param) {
     function mountDone() {
       $('#ai-towo').onclick = function () { AI = null; go('assign-inventory/wo', w.id); };
       $('#ai-tocut').onclick = function () {
-        var rec = (FG().inventoryAssignments || []).filter(function (a) { return a.id === AI.assignId; })[0];
-        var roll = rollById(rec.rollId);
+        var rec = AI.assignRec ||
+          (FG().inventoryAssignments || []).filter(function (a) { return a.id === AI.assignId; })[0];
+        var roll = rec && rollById(rec.rollId);
         if (!roll) { bad(); return; }
         newCutSession();
         C.roll = roll; C.woId = w.id; C.assignId = rec.id; C.lineId = rec.lineId;
@@ -1855,7 +1889,8 @@ Screens['assign-inventory/verify-loc'] = function (param) {
         if (rec) {
           rec.locationVerifiedAt = now; rec.locationVerifiedBy = DB.data.currentEmployee;
           logAssignEvent('LOCATION_VERIFIED', { user: DB.data.currentEmployee,
-            workOrderId: rec.workOrderId, rollId: roll.id, assignmentId: rec.id,
+            workOrderId: rec.workOrderId, lineId: rec.lineId,
+            rollId: roll.id, assignmentId: rec.id,
             detail: 'Location ' + loc + ' verified' });
           DB.save();
         }
@@ -2783,7 +2818,7 @@ Screens['cut/entry'] = function () {
         var rec0 = (FG().inventoryAssignments || []).filter(function (a) { return a.id === C.assignId; })[0];
         if (rec0) { rec0.rollVerifiedAt = now; rec0.rollVerifiedBy = DB.data.currentEmployee; DB.save(); }
         logAssignEvent('ROLL_VERIFIED', { user: DB.data.currentEmployee, workOrderId: C.woId,
-          rollId: C.roll.id, assignmentId: C.assignId, detail: '✓ CORRECT ROLL' });
+          lineId: C.lineId, rollId: C.roll.id, assignmentId: C.assignId, detail: '✓ CORRECT ROLL' });
         box.innerHTML = '<div class="ok-panel"><div class="big-ok">&#10003; CORRECT ROLL</div></div>';
       } else {
         bad();
@@ -2795,7 +2830,7 @@ Screens['cut/entry'] = function () {
         if (sup && $('#cut-verifyoverride')) $('#cut-verifyoverride').onclick = function () {
           C.rollVerified = true;
           logAssignEvent('ROLL_VERIFICATION_OVERRIDDEN', { user: DB.data.currentEmployee, workOrderId: C.woId,
-            rollId: C.roll.id, assignmentId: C.assignId, detail: 'Supervisor overrode wrong-roll warning; scanned "' + code + '"' });
+            lineId: C.lineId, rollId: C.roll.id, assignmentId: C.assignId, detail: 'Supervisor overrode wrong-roll warning; scanned "' + code + '"' });
           box.innerHTML = '<div class="warn-panel"><div class="big-ok">OVERRIDE ACCEPTED</div></div>';
           good();
         };

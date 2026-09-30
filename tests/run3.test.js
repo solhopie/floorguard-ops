@@ -249,6 +249,19 @@ ok(S.assignEventsForWO('XS024536').some(function (e) { return e.action === 'ASSI
   'ASSIGNMENT_CONSUMED audited');
 var onlyActive = S.activeAssignments('XS024536', 'XS024536-L1');
 ok(onlyActive.length === 0, 'consumed reservation leaves no active reservation');
+/* Regression (live walkthrough 2026-09-30): a consumed line must read
+   COMPLETED — never fall back to NOT_ASSIGNED and reappear in NEEDS INVENTORY. */
+var stAfterCut = S.lineStatus(S.woById('XS024536'), S.lineById(S.woById('XS024536'), 'XS024536-L1'));
+ok(stAfterCut === 'COMPLETED', 'consumed line status is COMPLETED, not NOT_ASSIGNED');
+ok(S.aiLineStatusChip('COMPLETED').indexOf('COMPLETED') >= 0, 'COMPLETED chip renders');
+var consumedEvt = S.assignEventsForWO('XS024536').filter(function (e) { return e.action === 'ASSIGNMENT_CONSUMED'; })[0];
+ok(consumedEvt && consumedEvt.lineId === 'XS024536-L1', 'ASSIGNMENT_CONSUMED event carries lineId');
+/* Partial consumption still needs inventory. */
+var w2 = S.woById('XS024537'), l2 = S.lineById(w2, 'XS024537-L1');
+var rp = S.assignInventory({ woId: 'XS024537', lineId: 'XS024537-L1', rollId: '16628698',
+  reservedIn: 200, employee: 'Marcus' });
+S.consumeAssignment(rp.rec.id, { cutId: 'KPART', actualCutIn: 200, by: 'Marcus' });
+ok(S.lineStatus(w2, l2) === 'PARTIALLY_ASSIGNED', 'partially cut line stays PARTIALLY_ASSIGNED');
 
 /* ---------- assignment detail screen ---------- */
 freshDB();
