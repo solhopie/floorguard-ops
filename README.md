@@ -42,8 +42,21 @@ FloorGuard Ops is the one app and the one codebase; the prototype is legacy/refe
 - Work Orders: ALL / ASSIGNED / UNASSIGNED, detail, assign employee, link rolls (scan or pick), WO-launched cuts (roll linked, OPEN &rarr; IN_PROGRESS)
 - History cards: capture, permanent per-roll records, UNVERIFIED IMPORTED HISTORY extraction (CONFIRM / EDIT / IGNORE)
 - Manager report + exports: print/PDF, CSV, structured JSON
-- Data: one localStorage key (`floorguard_ops_v1`), schema v2 (warehouse context + roles + shared FloorGuard store), integer-inch measurements, append-only cuts
+- Data: one localStorage key (`floorguard_ops_v1`), schema v4 (warehouse context + roles + shared FloorGuard store + scheduling fields), integer-inch measurements, append-only cuts
 - Scanner: camera (BarcodeDetector &rarr; vendored ZXing fallback), hardware keyboard wedge, manual entry; `01` manufacturer-prefix stripping; real location codes
+
+## Run 5 — Scheduled Jobs + Daily Warehouse Queue (v0.5.0)
+
+The daily screen warehouse employees use: what is due today, what is coming, what is in progress, what is done. No second scheduling database — scheduled jobs ARE work orders.
+
+- **`/scheduled-jobs`**: TODAY / UPCOMING / IN PROGRESS / COMPLETED tabs with badge counts, MY JOBS, UNASSIGNED (supervisor), search, filters (status, priority, employee, property, material, inventory readiness), sort (schedule, property, status, employee, WO).
+- **Derived readiness** (never stored, never drifts): WAITING FOR INVENTORY / INVENTORY ASSIGNED / READY TO CUT / IN PROGRESS / CUT COMPLETE / READY FOR NEXT STEP / COMPLETED / ON HOLD / CANCELLED — computed from material lines + inventory assignments + cuts + audit events.
+- **Current warehouse step** (derived): ASSIGN INVENTORY / VERIFY ROLL / CUT MATERIAL / CYCLE COUNT REVIEW / WAITING / COMPLETE.
+- **Job cards** show one next action (ASSIGN INVENTORY, CONTINUE TO CUT, CONTINUE WORK, VIEW WORK ORDER, VIEW COMPLETED JOB) and inventory readiness without opening Assign Inventory.
+- **Job detail** (`/scheduled-job/<id>`): schedule, priority, per-line progress, roll/location visibility, cut status, hold/resume (supervisor, reason required), employee assignment, guarded warehouse completion (`WAREHOUSE_WORK_COMPLETED` audit event), append-only notes, full activity feed.
+- **Repository**: `getScheduledJobs` / `getJobsForDate` / `getMyScheduledJobs` / `setJobHold` / `resumeJob` / `startWarehouseWork` / `assignEmployee` / `completeWarehouseWork` / `addWorkOrderNote` on both Local and Shared providers; shared-mode writes PATCH `work_orders` + append `audit_events` and fail fast offline.
+- **Dashboard**: TODAY'S QUEUE cards (Today's Jobs, In Progress, Waiting for Inventory, Completed Today) deep-link into the queue.
+- Migration `0006_scheduled_jobs.sql`: priority, scheduled_time, on_hold/hold_reason/hold_at/hold_by, warehouse_completed_at/by on `work_orders`.
 
 ## Run 4 — Shared Backend + Multi-Device Sync (v0.4.0)
 

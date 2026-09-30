@@ -394,3 +394,22 @@ select.input { appearance: auto; }
 .chip.cur { border-color: var(--accent); color: var(--accent); }
 .avatar { width: 64px; height: 64px; border-radius: 50%; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 1.6rem; font-weight: 800; }
 .brand { display: flex; gap: 14px; align-items: center; margin-bottom: 8px; }
+
+/* ---- Run 5: scheduled jobs / daily warehouse queue ---- */
+.st-orange { background: #7c2d12; color: #fed7aa; }
+.qcards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+.qcard { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 12px 6px;
+  border-radius: 12px; border: 2px solid var(--line); background: var(--panel); color: var(--text);
+  cursor: pointer; min-height: 72px; }
+.qcard:active { border-color: var(--accent); }
+.qnum { font-size: 1.6rem; font-weight: 800; }
+.qlabel { font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; opacity: .85; text-align: center; }
+.sjcard { cursor: pointer; }
+.sjcard .big { font-size: 1.25rem; }
+.badge { display: inline-block; min-width: 1.4em; padding: 0 .35em; border-radius: 999px;
+  background: rgba(255,255,255,.18); font-size: .8em; }
+.fchip.on .badge { background: rgba(255,255,255,.28); }
+.frow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.linkbtn { background: none; border: none; color: inherit; font: inherit; text-decoration: underline;
+  cursor: pointer; padding: 0; }
+@media (max-width: 480px) { .qcards { grid-template-columns: repeat(2, 1fr); } }

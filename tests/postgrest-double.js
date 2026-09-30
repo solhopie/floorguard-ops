@@ -30,6 +30,8 @@ function startDouble() {
 
   /* Seed: mirrors supabase/seed.sql (demo warehouse + two rolls + two WOs). */
   function seed() {
+    var todayD = new Date(), tomD = new Date(todayD.getTime() + 86400000);
+    function dstr(d) { return d.toISOString().slice(0, 10); }
     var rolls = state.tables.rolls;
     rolls.set('16628697', { id: '16628697', barcode: '16628697', style: 'Marvel', color: 'Chrome',
       material_type: 'carpet', width_in: 144, beginning_in: 1034, expected_in: 1034,
@@ -40,8 +42,10 @@ function startDouble() {
       location_code: '206B', version: 1, warehouse_id: 'main', discovered: false,
       measured_in: null, measured_at: null, measured_by: null });
     var wo = state.tables.work_orders;
-    wo.set('XS024536', { id: 'XS024536', number: 'XS024536', warehouse_id: 'main', status: 'OPEN' });
-    wo.set('XS024537', { id: 'XS024537', number: 'XS024537', warehouse_id: 'main', status: 'OPEN' });
+    wo.set('XS024536', { id: 'XS024536', number: 'XS024536', warehouse_id: 'main', status: 'OPEN',
+      scheduled_date: dstr(todayD), scheduled_time: '09:00', priority: 'HIGH' });
+    wo.set('XS024537', { id: 'XS024537', number: 'XS024537', warehouse_id: 'main', status: 'OPEN',
+      scheduled_date: dstr(tomD), scheduled_time: '10:30', priority: 'NORMAL' });
     var lines = state.tables.work_order_material_lines;
     lines.set('XS024536-L1', { id: 'XS024536-L1', work_order_id: 'XS024536', warehouse_id: 'main',
       style: 'Marvel', color: 'Chrome', width_in: 144, material_type: 'carpet', required_in: 237 });

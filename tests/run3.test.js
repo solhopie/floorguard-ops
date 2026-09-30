@@ -65,7 +65,7 @@ function freshDB() { S.DB.reset(); els = {}; S.DB.data.currentEmployee = 'Marcus
 
 /* ---------- schema 3 + seed ---------- */
 freshDB();
-ok(S.DB.data.schema === 3, 'seed schema is 3');
+ok(S.DB.data.schema === 4, 'seed schema is 4');
 ok(Array.isArray(S.FG().inventoryAssignments), 'inventoryAssignments collection exists');
 ok(Array.isArray(S.FG().assignmentEvents), 'assignmentEvents audit collection exists');
 ok(S.woById('XS024536').property === 'Ventura Pointe', 'XS024536 seed order exists');
@@ -85,7 +85,7 @@ ok(S.systemBalance('16628697') === 1034, '16628697 balance is 86\' 2" (1034in)')
   var v2 = S.DB.seed(); v2.schema = 2; v2.modules.floorguard = fg;
   store[S.DB.KEY] = JSON.stringify(v2);
   S.DB.load();
-  ok(S.DB.data.schema === 3, 'schema 2 migrates to 3');
+  ok(S.DB.data.schema === 4, 'schema 2 migrates to 4');
   ok(Array.isArray(S.FG().inventoryAssignments), 'migration adds inventoryAssignments');
   var w1 = S.woById('WO-1001');
   ok(w1.lines && w1.lines[0].requiredIn === 850, 'migration synthesizes material lines from flat WO fields');
@@ -216,7 +216,10 @@ ok(ledger.indexOf('Assigned to Work Order') >= 0, 'roll ledger shows ASSIGNED TO
 ok(ledger.indexOf('XS024536') >= 0, 'roll ledger names the work order');
 
 /* ---------- release flow ---------- */
-var rel = S.releaseAssignment(S.FG().inventoryAssignments[0].id, 'Marcus');
+var relTarget = S.FG().inventoryAssignments.filter(function (a) {
+  return a.workOrderId === 'XS024536' && a.status === 'RESERVED';
+})[0];
+var rel = S.releaseAssignment(relTarget.id, 'Marcus');
 ok(rel.ok, 'supervisor can release');
 ok(S.lineStatus(S.woById('XS024536'), S.lineById(S.woById('XS024536'), 'XS024536-L1')) === 'NOT_ASSIGNED',
   'after release the line returns to NOT_ASSIGNED');
@@ -239,7 +242,7 @@ S.document.querySelector('#cft').value = '19'; S.document.querySelector('#cin').
 S.document.querySelector('#wo').value = 'XS024536';
 elFor('savecut').click();
 ok(S.document.querySelector('#cuterr').hidden === false, 'SAVE CUT blocked until the roll is verified');
-ok(S.FG().inventoryAssignments[0].status === 'RESERVED', 'unverified cut does not consume the reservation');
+ok(S.FG().inventoryAssignments.filter(function (a) { return a.id === ra.rec.id; })[0].status === 'RESERVED', 'unverified cut does not consume the reservation');
 
 /* ---------- cut completion -> CONSUMED ---------- */
 var cons = S.consumeAssignment(ra.rec.id, { cutId: 'KTEST', actualCutIn: 237, by: 'Marcus' });

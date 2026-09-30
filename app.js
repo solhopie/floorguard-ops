@@ -25,7 +25,7 @@ function daypart() {
   return 'evening';
 }
 
-var APP_VERSION = '0.4.0';
+var APP_VERSION = '0.5.0';
 
 /* ---------------- data layer ----------------
    One localStorage key, schema version, per-module namespaces.
@@ -33,11 +33,11 @@ var APP_VERSION = '0.4.0';
    through DB.ns('<module-key>'). */
 var DB = {
   KEY: 'floorguard_ops_v1',
-  SCHEMA: 3,
+  SCHEMA: 4,
   data: null,
   seed: function () {
     return {
-      schema: 3,
+      schema: 4,
       currentEmployee: null,
       employees: ['Marcus', 'Dana', 'Luis'],
       employeeRoles: { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' },
@@ -52,25 +52,37 @@ var DB = {
       var raw = localStorage.getItem(this.KEY);
       if (raw) {
         var d = JSON.parse(raw);
-        if (d && d.schema === 3) { this.data = d; ensureFloorguardStore(); return; }
+        if (d && d.schema === 4) { this.data = d; ensureFloorguardStore(); return; }
+        if (d && d.schema === 3) {
+          /* v3 -> v4: Run 5 scheduled-job fields on work orders.
+             Readiness stays derived; no stored state to drift. */
+          d.schema = 4;
+          this.data = d;
+          migrateFloorguardV3toV4();
+          this.save();
+          return;
+        }
         if (d && d.schema === 2) {
           /* v2 -> v3: Run 3 inventory assignment collections + work-order
              material lines. Existing roll links and balances are untouched. */
           d.schema = 3;
           this.data = d;
           migrateFloorguardV2toV3();
+          migrateFloorguardV3toV4();
+          d.schema = 4;
           this.save();
           return;
         }
         if (d && d.schema === 1) {
           /* v1 -> v2: add warehouse context + roles, seed the shared
              FloorGuard inventory store. Run 1 session data is kept. */
-          d.schema = 3;
+          d.schema = 4;
           if (!d.warehouses) d.warehouses = [{ id: 'main', name: 'Main Warehouse' }];
           if (!d.currentWarehouse) d.currentWarehouse = 'main';
           if (!d.employeeRoles) d.employeeRoles = { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' };
           this.data = d;
           migrateFloorguardV2toV3();
+          migrateFloorguardV3toV4();
           this.save();
           return;
         }
@@ -100,6 +112,12 @@ function seedFloorguard() {
   var now = Date.now();
   var H = 3600 * 1000, D = 24 * H;
   var at = function (msAgo) { return new Date(now - msAgo).toISOString(); };
+  /* Run 5: warehouse-local calendar date string, dayOffset from today. */
+  var dstr = function (dayOffset) {
+    var d = new Date(now + dayOffset * D);
+    var m = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+  };
   return {
     rolls: [
       { id: 'QH5CPHN', barcode: 'QH5CPHN', manufacturer: 'Shaw Industries',
@@ -127,17 +145,23 @@ function seedFloorguard() {
         beginningIn: 1034, expectedLocation: '205B' },
       { id: '16628698', barcode: '16628698', manufacturer: 'Shaw',
         style: 'Marvel', color: 'Chrome', materialType: 'Carpet', widthIn: 144,
-        beginningIn: 366, expectedLocation: '206B' }
+        beginningIn: 366, expectedLocation: '206B' },
+      /* Run 5: dedicated roll for the completed-demo work order XS024542. */
+      { id: '16628699', barcode: '16628699', manufacturer: 'Shaw',
+        style: 'Marvel', color: 'Chrome', materialType: 'Carpet', widthIn: 144,
+        beginningIn: 500, expectedLocation: '204A' }
     ],
     discovered: [],   /* { id, raw, firstSeenAt, firstSeenBy, lastLocation,
                           lastMeasuredIn, lastMeasuredAt, lastMeasuredBy, count } */
     cuts: [
       { id: 'K1', rollId: 'QH5CPHN', barcode: 'QH5CPHN', order: 'XS024531', inches: 323, prevIn: 1801, newIn: 1478, location: '205B', at: at(3 * D + 5 * H), by: 'Marcus' },
       { id: 'K2', rollId: 'QH5CPHN', barcode: 'QH5CPHN', order: 'XS024532', inches: 444, prevIn: 1478, newIn: 1034, location: '205B', at: at(2 * D + 3 * H), by: 'Dana' },
-      { id: 'K3', rollId: 'QH5CPHN', barcode: 'QH5CPHN', order: 'XS024536', inches: 498, prevIn: 1034, newIn: 536, location: '205B', at: at(1 * D + 6 * H), by: 'Marcus' },
+      { id: 'K3', rollId: 'QH5CPHN', barcode: 'QH5CPHN', order: 'XS024531', inches: 498, prevIn: 1034, newIn: 536, location: '205B', at: at(1 * D + 6 * H), by: 'Marcus' },
       { id: 'K4', rollId: 'TK7M2QA', barcode: 'TK7M2QA', order: 'XS024540', inches: 200, prevIn: 1440, newIn: 1240, location: '205A', at: at(2 * D + 8 * H), by: 'Dana' },
-      { id: 'K5', rollId: 'PL9XD4R', barcode: 'PL9XD4R', order: 'XS024541', inches: 360, prevIn: 1680, newIn: 1320, location: '206B', at: at(4 * D + 2 * H), by: 'Luis' },
-      { id: 'K6', rollId: 'QW8ZV2N', barcode: 'QW8ZV2N', order: 'XS024544', inches: 120, prevIn: 1320, newIn: 1200, location: '204B', at: at(5 * D + 4 * H), by: 'Marcus' }
+      { id: 'K5', rollId: 'PL9XD4R', barcode: 'PL9XD4R', order: 'XS024531', inches: 360, prevIn: 1680, newIn: 1320, location: '206B', at: at(4 * D + 2 * H), by: 'Luis' },
+      { id: 'K6', rollId: 'QW8ZV2N', barcode: 'QW8ZV2N', order: 'XS024532', inches: 120, prevIn: 1320, newIn: 1200, location: '204B', at: at(5 * D + 4 * H), by: 'Marcus' },
+      /* Run 5: the cut that consumed assignment A-SEED1 on the completed demo job. */
+      { id: 'K7', rollId: '16628699', barcode: '16628699', order: 'XS024542', inches: 240, prevIn: 500, newIn: 260, location: '204A', at: at(1 * D + 2 * H), by: 'Marcus' }
     ],
     counts: [
       { id: 'C-SEED-1', rollId: 'QH5CPHN', style: 'Venture Solid', color: 'Soft Taupe',
@@ -180,24 +204,36 @@ function seedFloorguard() {
         style: 'Venture Solid', color: 'Soft Taupe', materialType: 'Carpet', uom: 'LF',
         widthIn: 144, quantity: 850, rollId: 'QH5CPHN', assigneeId: 'e1',
         opStatus: 'IN_PROGRESS', createdAt: at(6 * D),
+        priority: 'NORMAL', scheduledDate: null, scheduledTime: null,
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
         lines: [{ id: 'WO-1001-L1', style: 'Venture Solid', color: 'Soft Taupe', materialType: 'Carpet',
           uom: 'LF', widthIn: 144, requiredIn: 850 }] },
       { id: 'WO-1002', number: 'WO-1002', property: 'Oak Ave Residence', account: 'Acme Flooring Co',
         style: 'EverStrand Soft', color: 'Harbor Gray', materialType: 'Carpet', uom: 'LF',
         widthIn: 144, quantity: 620, rollId: 'TK7M2QA', assigneeId: null,
         opStatus: 'OPEN', createdAt: at(5 * D),
+        priority: 'NORMAL', scheduledDate: null, scheduledTime: null,
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
         lines: [{ id: 'WO-1002-L1', style: 'EverStrand Soft', color: 'Harbor Gray', materialType: 'Carpet',
           uom: 'LF', widthIn: 144, requiredIn: 620 }] },
       { id: 'WO-1003', number: 'WO-1003', property: 'Pine Rd Residence', account: 'HomeStyle Interiors',
         style: 'Pure Earth', color: 'Desert Sand', materialType: 'Carpet', uom: 'LF',
         widthIn: 180, quantity: 400, rollId: null, assigneeId: 'e2',
         opStatus: 'OPEN', createdAt: at(4 * D),
+        priority: 'NORMAL', scheduledDate: null, scheduledTime: null,
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
         lines: [{ id: 'WO-1003-L1', style: 'Pure Earth', color: 'Desert Sand', materialType: 'Carpet',
           uom: 'LF', widthIn: 180, requiredIn: 400 }] },
       { id: 'WO-1004', number: 'WO-1004', property: 'Cedar Ln Residence', account: 'Acme Flooring Co',
         style: 'Tuftex Nylon', color: 'Midnight Blue', materialType: 'Carpet', uom: 'LF',
         widthIn: 144, quantity: 300, rollId: null, assigneeId: null,
         opStatus: 'OPEN', createdAt: at(3 * D),
+        priority: 'NORMAL', scheduledDate: null, scheduledTime: null,
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
         lines: [{ id: 'WO-1004-L1', style: 'Tuftex Nylon', color: 'Midnight Blue', materialType: 'Carpet',
           uom: 'LF', widthIn: 144, requiredIn: 300 }] },
       /* Run 3 assignment demo orders: Marvel / Chrome 12 FT carpet. */
@@ -205,18 +241,83 @@ function seedFloorguard() {
         style: 'Marvel', color: 'Chrome', materialType: 'Carpet', uom: 'LF',
         widthIn: 144, quantity: 237, rollId: null, assigneeId: 'e1',
         opStatus: 'OPEN', createdAt: at(2 * D),
+        priority: 'HIGH', scheduledDate: dstr(0), scheduledTime: '09:00',
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
         lines: [{ id: 'XS024536-L1', style: 'Marvel', color: 'Chrome', materialType: 'Carpet',
           uom: 'LF', widthIn: 144, requiredIn: 237 }] },
       { id: 'XS024537', number: 'XS024537', property: 'Harbor Ridge', account: 'Willowbridge',
         style: 'Marvel', color: 'Chrome', materialType: 'Carpet', uom: 'LF',
         widthIn: 144, quantity: 495, rollId: null, assigneeId: 'e2',
         opStatus: 'OPEN', createdAt: at(1 * D),
+        priority: 'NORMAL', scheduledDate: dstr(1), scheduledTime: '10:30',
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
         lines: [{ id: 'XS024537-L1', style: 'Marvel', color: 'Chrome', materialType: 'Carpet',
-          uom: 'LF', widthIn: 144, requiredIn: 495 }] }
+          uom: 'LF', widthIn: 144, requiredIn: 495 }] },
+      /* Run 5 demo queue: today / upcoming / in-progress / completed /
+         unassigned / on-hold examples around the XS orders. */
+      { id: 'XS024541', number: 'XS024541', property: 'Cedar Bluff', account: 'Willowbridge',
+        style: 'Tuftex Nylon', color: 'Midnight Blue', materialType: 'Carpet', uom: 'LF',
+        widthIn: 144, quantity: 300, rollId: null, assigneeId: null,
+        opStatus: 'OPEN', createdAt: at(1 * D),
+        priority: 'URGENT', scheduledDate: dstr(0), scheduledTime: '08:00',
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
+        lines: [{ id: 'XS024541-L1', style: 'Tuftex Nylon', color: 'Midnight Blue', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 300 }] },
+      { id: 'XS024542', number: 'XS024542', property: 'Stonebridge', account: 'Willowbridge',
+        style: 'Marvel', color: 'Chrome', materialType: 'Carpet', uom: 'LF',
+        widthIn: 144, quantity: 240, rollId: '16628699', assigneeId: 'e1',
+        opStatus: 'COMPLETE', createdAt: at(2 * D),
+        priority: 'NORMAL', scheduledDate: dstr(-1), scheduledTime: '09:00',
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: at(20 * H), warehouseCompletedBy: 'Marcus',
+        lines: [{ id: 'XS024542-L1', style: 'Marvel', color: 'Chrome', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 240 }] },
+      { id: 'XS024543', number: 'XS024543', property: 'Fox Hollow', account: 'Willowbridge',
+        style: 'Marvel', color: 'Chrome', materialType: 'Carpet', uom: 'LF',
+        widthIn: 144, quantity: 180, rollId: null, assigneeId: 'e2',
+        opStatus: 'OPEN', createdAt: at(1 * D),
+        priority: 'HIGH', scheduledDate: dstr(0), scheduledTime: '13:00',
+        onHold: true, holdReason: 'MATERIAL NOT FOUND', holdAt: at(2 * H), holdBy: 'Dana',
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
+        lines: [{ id: 'XS024543-L1', style: 'Marvel', color: 'Chrome', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 180 }] },
+      { id: 'XS024544', number: 'XS024544', property: 'River Oaks', account: 'Willowbridge',
+        style: 'Marvel', color: 'Chrome', materialType: 'Carpet', uom: 'LF',
+        widthIn: 144, quantity: 150, rollId: '16628697', assigneeId: 'e1',
+        opStatus: 'IN_PROGRESS', createdAt: at(1 * D),
+        priority: 'NORMAL', scheduledDate: dstr(0), scheduledTime: '07:30',
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
+        startedAt: at(3 * H), startedBy: 'Marcus',
+        lines: [{ id: 'XS024544-L1', style: 'Marvel', color: 'Chrome', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 150 }] },
+      { id: 'XS024545', number: 'XS024545', property: 'Lakeshore', account: 'Harbor & Vine',
+        style: 'EverStrand Soft', color: 'Harbor Gray', materialType: 'Carpet', uom: 'LF',
+        widthIn: 144, quantity: 420, rollId: null, assigneeId: null,
+        opStatus: 'OPEN', createdAt: at(1 * D),
+        priority: 'NORMAL', scheduledDate: dstr(3), scheduledTime: '09:30',
+        onHold: false, holdReason: null, holdAt: null, holdBy: null,
+        warehouseCompletedAt: null, warehouseCompletedBy: null,
+        lines: [{ id: 'XS024545-L1', style: 'EverStrand Soft', color: 'Harbor Gray', materialType: 'Carpet',
+          uom: 'LF', widthIn: 144, requiredIn: 420 }] }
     ],
     /* Run 3: inventory reservations. Append-only records — reservations NEVER
-       change roll balances; only cut transactions do. */
-    inventoryAssignments: [],
+       change roll balances; only cut transactions do.
+       Run 5: one seeded CONSUMED assignment backing the completed demo job. */
+    inventoryAssignments: [
+      { id: 'A-SEED1', workOrderId: 'XS024542', lineId: 'XS024542-L1', rollId: '16628699',
+        discovered: false, requiredIn: 240, reservedIn: 240,
+        employee: 'Marcus', warehouseId: 'main', location: '204A',
+        at: at(1 * D + 3 * H), status: 'CONSUMED',
+        mismatchApprovedBy: null, overApprovedBy: null,
+        rollVerifiedAt: at(1 * D + 3 * H), rollVerifiedBy: 'Marcus',
+        locationVerifiedAt: null, locationVerifiedBy: null,
+        releasedAt: null, releasedBy: null,
+        consumedAt: at(1 * D + 2 * H), consumedBy: 'Marcus', cutId: 'K7', actualCutIn: 240 }
+    ],
     /* Run 3: append-only audit trail for every assignment action. */
     assignmentEvents: []
   };
@@ -254,6 +355,25 @@ function migrateFloorguardV2toV3() {
         materialType: w.materialType, uom: w.uom, widthIn: w.widthIn,
         requiredIn: Math.round(Number(w.quantity) || 0) }];
     }
+  });
+  DB.save();
+}
+
+/* Run 5 (schema 4): scheduling fields on work orders. Existing balances,
+   cuts, counts, assignments, and history are untouched. */
+function migrateFloorguardV3toV4() {
+  var fg = DB.data.modules['floorguard'];
+  if (!fg) { ensureFloorguardStore(); return; }
+  (fg.workOrders || []).forEach(function (w) {
+    if (w.priority == null) w.priority = 'NORMAL';
+    if (w.scheduledDate === undefined) w.scheduledDate = null;
+    if (w.scheduledTime === undefined) w.scheduledTime = null;
+    if (w.onHold === undefined) w.onHold = false;
+    if (w.holdReason === undefined) w.holdReason = null;
+    if (w.holdAt === undefined) w.holdAt = null;
+    if (w.holdBy === undefined) w.holdBy = null;
+    if (w.warehouseCompletedAt === undefined) w.warehouseCompletedAt = null;
+    if (w.warehouseCompletedBy === undefined) w.warehouseCompletedBy = null;
   });
   DB.save();
 }
@@ -366,9 +486,289 @@ function overReserved(rollId, newReservedIn) {
   var total = reservedOnRoll(rollId) + newReservedIn;
   return { over: total > bal, unknown: false, total: total, balance: bal };
 }
+/* ---------------- scheduled jobs / daily warehouse queue (Run 5) --------
+   Scheduled Jobs ARE Work Orders — no second scheduling database. Every
+   value below is DERIVED from work orders + material lines + inventory
+   assignments + cuts + audit events. Readiness is never stored, so it
+   cannot drift. */
+
+/* Warehouse-local calendar date as YYYY-MM-DD. */
+function warehouseToday() {
+  var d = new Date();
+  var m = d.getMonth() + 1, day = d.getDate();
+  return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+}
+/* 'YYYY-MM-DD' -> Date at local midnight. */
+function dateStrToDate(ds) {
+  var p = String(ds || '').split('-');
+  return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+}
+function addDaysStr(ds, n) {
+  var d = dateStrToDate(ds);
+  d.setDate(d.getDate() + n);
+  var m = d.getMonth() + 1, day = d.getDate();
+  return d.getFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (day < 10 ? '0' + day : day);
+}
+/* Current employee name -> 'eN' assignee id, or null. */
+function currentAssigneeId() {
+  var name = (typeof DB !== 'undefined' && DB.data) ? DB.data.currentEmployee : null;
+  var i = ((DB.data && DB.data.employees) || []).indexOf(name);
+  return i >= 0 ? 'e' + (i + 1) : null;
+}
+
+/* All cut transactions recorded against one work order (by printed number). */
+function woCuts(wo) {
+  return (FG().cuts || []).filter(function (c) { return c.order === wo.number; });
+}
+/* Readiness states — derived, never stored. */
+var JOB_STATES = {
+  WAITING_FOR_INVENTORY: 'WAITING FOR INVENTORY',
+  INVENTORY_ASSIGNED: 'INVENTORY ASSIGNED',
+  READY_TO_CUT: 'READY TO CUT',
+  IN_PROGRESS: 'IN PROGRESS',
+  CUT_COMPLETE: 'CUT COMPLETE',
+  READY_FOR_NEXT_STEP: 'READY FOR NEXT STEP',
+  COMPLETED: 'COMPLETED',
+  ON_HOLD: 'ON HOLD',
+  CANCELLED: 'CANCELLED'
+};
+/* Per-line progress: WAITING FOR INVENTORY / INVENTORY ASSIGNED /
+   READY TO CUT / CUT COMPLETE — from the same lineStatus() Run 3 uses. */
+function lineProgress(wo, line) {
+  var st = lineStatus(wo, line);
+  if (st === 'COMPLETED') return 'CUT COMPLETE';
+  if (st === 'ASSIGNED') return 'READY TO CUT';
+  if (st === 'PARTIALLY_ASSIGNED') return 'INVENTORY ASSIGNED';
+  return 'WAITING FOR INVENTORY';
+}
+/* The derived readiness of a whole work order (spec section 6). */
+function jobReadiness(wo) {
+  if (!wo) return JOB_STATES.WAITING_FOR_INVENTORY;
+  if (wo.opStatus === 'CANCELLED') return JOB_STATES.CANCELLED;
+  if (wo.onHold) return JOB_STATES.ON_HOLD;
+  if (wo.opStatus === 'COMPLETE' || wo.warehouseCompletedAt) return JOB_STATES.COMPLETED;
+  var lines = wo.lines || [];
+  if (!lines.length) return JOB_STATES.WAITING_FOR_INVENTORY;
+  var prog = lines.map(function (l) { return lineProgress(wo, l); });
+  var done = prog.filter(function (p) { return p === 'CUT COMPLETE'; }).length;
+  if (done === lines.length) return JOB_STATES.READY_FOR_NEXT_STEP;
+  if (wo.opStatus === 'IN_PROGRESS') return JOB_STATES.IN_PROGRESS;
+  if (done > 0) return JOB_STATES.CUT_COMPLETE;
+  var ready = prog.filter(function (p) { return p === 'READY TO CUT'; }).length;
+  if (ready === lines.length) return JOB_STATES.READY_TO_CUT;
+  var anyRes = prog.some(function (p) { return p !== 'WAITING FOR INVENTORY'; });
+  return anyRes ? JOB_STATES.INVENTORY_ASSIGNED : JOB_STATES.WAITING_FOR_INVENTORY;
+}
+/* Derived current warehouse step. */
+function currentWarehouseStep(wo) {
+  var r = jobReadiness(wo);
+  if (r === JOB_STATES.COMPLETED) return 'COMPLETE';
+  if (r === JOB_STATES.ON_HOLD || r === JOB_STATES.CANCELLED) return 'WAITING';
+  if (r === JOB_STATES.READY_FOR_NEXT_STEP) return 'CYCLE COUNT REVIEW';
+  var lines = wo.lines || [];
+  var acts = [];
+  lines.forEach(function (l) {
+    allAssignmentsForLine(wo.id, l.id).forEach(function (a) {
+      if (a.status === AI_STATUS.RESERVED) acts.push(a);
+    });
+  });
+  if (woCuts(wo).length) return 'CUT MATERIAL';
+  if (acts.length) {
+    var unverified = acts.some(function (a) { return !a.rollVerifiedAt; });
+    return unverified ? 'VERIFY ROLL' : 'CUT MATERIAL';
+  }
+  return 'ASSIGN INVENTORY';
+}
+/* Inventory readiness summary for cards (spec section 20). */
+function inventoryReadiness(wo) {
+  var lines = wo.lines || [];
+  if (!lines.length) return 'NOT ASSIGNED';
+  var parts = [];
+  var allDone = true, anyRes = false;
+  lines.forEach(function (l) {
+    var act = activeAssignments(wo.id, l.id);
+    var st = lineStatus(wo, l);
+    if (st === 'COMPLETED') {
+      parts.push({ line: l, text: 'COMPLETE', cls: 'st-green' });
+    } else if (act.length) {
+      anyRes = true;
+      if (act.length === 1 && act[0].rollId) {
+        var roll = rollById(act[0].rollId);
+        var loc = (roll && roll.expectedLocation) || act[0].location || '';
+        parts.push({ line: l, text: 'ROLL ' + act[0].rollId + (loc ? ' · ' + loc : ''), cls: 'st-blue',
+                     rollId: act[0].rollId, assignId: act[0].id });
+      } else {
+        parts.push({ line: l, text: 'RESERVED ×' + act.length, cls: 'st-blue' });
+      }
+      if (st !== 'ASSIGNED') allDone = false;
+    } else {
+      allDone = false;
+      parts.push({ line: l, text: 'NOT ASSIGNED', cls: 'st-yellow' });
+    }
+  });
+  return parts.length === 1 && parts[0].text === 'NOT ASSIGNED' && !anyRes
+    ? 'NOT ASSIGNED'
+    : { parts: parts, partial: !allDone && anyRes, complete: allDone };
+}
+/* Cut status: CUT REQUIRED / CUT IN PROGRESS / CUT COMPLETE (+ actual). */
+function woCutStatus(wo) {
+  var lines = wo.lines || [];
+  var cuts = woCuts(wo);
+  var cutIn = cuts.reduce(function (s, c) { return s + (c.inches || 0); }, 0);
+  var doneLines = lines.filter(function (l) { return lineStatus(wo, l) === 'COMPLETED'; }).length;
+  if (lines.length && doneLines === lines.length && cuts.length)
+    return { state: 'CUT COMPLETE', cutIn: cutIn, cuts: cuts };
+  if (cuts.length) return { state: 'CUT IN PROGRESS', cutIn: cutIn, cuts: cuts };
+  return { state: 'CUT REQUIRED', cutIn: 0, cuts: [] };
+}
+/* The single most relevant next action for a job card. */
+function jobQuickAction(wo) {
+  var r = jobReadiness(wo);
+  if (r === JOB_STATES.WAITING_FOR_INVENTORY || r === JOB_STATES.INVENTORY_ASSIGNED)
+    return { label: 'ASSIGN INVENTORY', route: 'assign-inventory/wo/' + wo.id };
+  if (r === JOB_STATES.READY_TO_CUT) {
+    var acts = [];
+    (wo.lines || []).forEach(function (l) {
+      allAssignmentsForLine(wo.id, l.id).forEach(function (a) {
+        if (a.status === AI_STATUS.RESERVED) acts.push(a);
+      });
+    });
+    var route = acts.length === 1 ? 'assign-inventory/a/' + acts[0].id : 'assign-inventory/wo/' + wo.id;
+    return { label: 'CONTINUE TO CUT', route: route };
+  }
+  if (r === JOB_STATES.IN_PROGRESS) return { label: 'CONTINUE WORK', route: 'scheduled-job/' + wo.id };
+  if (r === JOB_STATES.CUT_COMPLETE || r === JOB_STATES.READY_FOR_NEXT_STEP)
+    return { label: 'VIEW WORK ORDER', route: 'scheduled-job/' + wo.id };
+  if (r === JOB_STATES.COMPLETED) return { label: 'VIEW COMPLETED JOB', route: 'work-order/' + wo.id };
+  return { label: 'VIEW WORK ORDER', route: 'scheduled-job/' + wo.id };
+}
+/* Jobs for the queue: work orders that belong on the schedule. A work
+   order is a scheduled job when it has a scheduled date, is in progress,
+   is on hold, or completed recently. Unscheduled OPEN orders stay in the
+   Work Orders module only. */
+function isScheduledJob(wo) {
+  if (!wo) return false;
+  if (wo.scheduledDate) return true;
+  if (wo.onHold) return true;
+  if (wo.opStatus === 'IN_PROGRESS') return true;
+  if (wo.opStatus === 'COMPLETE' || wo.warehouseCompletedAt) return true;
+  return false;
+}
+function scheduledJobs() {
+  return (FG().workOrders || []).filter(isScheduledJob);
+}
+function jobsForDate(ds) {
+  return scheduledJobs().filter(function (w) { return w.scheduledDate === ds; });
+}
+function myScheduledJobs() {
+  var eid = currentAssigneeId();
+  return scheduledJobs().filter(function (w) { return w.assigneeId && w.assigneeId === eid; });
+}
+function unassignedJobs() {
+  return scheduledJobs().filter(function (w) { return !w.assigneeId; });
+}
+/* Dashboard counts (spec section 32). */
+function scheduledJobCounts() {
+  var today = warehouseToday();
+  var jobs = scheduledJobs();
+  var counts = { today: 0, inProgress: 0, waitingForInventory: 0, completedToday: 0 };
+  jobs.forEach(function (w) {
+    var r = jobReadiness(w);
+    if (w.scheduledDate === today) counts.today++;
+    if (r === JOB_STATES.IN_PROGRESS) counts.inProgress++;
+    if (r === JOB_STATES.WAITING_FOR_INVENTORY) counts.waitingForInventory++;
+    if (r === JOB_STATES.COMPLETED && w.warehouseCompletedAt && isToday(w.warehouseCompletedAt))
+      counts.completedToday++;
+  });
+  return counts;
+}
+/* ---- scheduled-job mutations (local; wrapped by Repository for shared) ---- */
+function setJobHoldLocal(woId, reason) {
+  var w = woById(woId);
+  if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  if (!isSupervisorRole(DB.data.currentEmployee))
+    return { ok: false, err: 'SUPERVISOR ROLE REQUIRED' };
+  if (w.onHold) return { ok: false, err: 'ALREADY ON HOLD' };
+  w.onHold = true; w.holdReason = reason || 'OTHER'; w.holdAt = new Date().toISOString();
+  w.holdBy = DB.data.currentEmployee;
+  DB.save();
+  logAssignEvent('JOB_HELD', { workOrderId: w.id, detail: 'Job placed ON HOLD: ' + w.holdReason });
+  return { ok: true, workOrder: w };
+}
+function resumeJobLocal(woId) {
+  var w = woById(woId);
+  if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  if (!isSupervisorRole(DB.data.currentEmployee))
+    return { ok: false, err: 'SUPERVISOR ROLE REQUIRED' };
+  if (!w.onHold) return { ok: false, err: 'NOT ON HOLD' };
+  w.onHold = false; w.holdReason = null; w.holdAt = null; w.holdBy = null;
+  DB.save();
+  logAssignEvent('JOB_RESUMED', { workOrderId: w.id, detail: 'Job resumed from hold.' });
+  return { ok: true, workOrder: w };
+}
+function startWarehouseWorkLocal(woId) {
+  var w = woById(woId);
+  if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  if (w.onHold) return { ok: false, err: 'JOB IS ON HOLD' };
+  if (w.opStatus !== 'IN_PROGRESS') {
+    w.opStatus = 'IN_PROGRESS';
+    w.startedAt = w.startedAt || new Date().toISOString();
+    w.startedBy = w.startedBy || DB.data.currentEmployee;
+    DB.save();
+    logAssignEvent('WAREHOUSE_WORK_STARTED', { workOrderId: w.id, detail: 'Warehouse work started.' });
+  }
+  return { ok: true, workOrder: w };
+}
+function assignEmployeeLocal(woId, assigneeId) {
+  var w = woById(woId);
+  if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  w.assigneeId = assigneeId || null;
+  DB.save();
+  var nm = woAssigneeName(w);
+  logAssignEvent('EMPLOYEE_ASSIGNED', { workOrderId: w.id,
+    detail: nm ? 'Assigned to ' + nm + '.' : 'Unassigned.' });
+  return { ok: true, workOrder: w };
+}
+/* Guard: every material line must be COMPLETED before warehouse completion. */
+function warehouseCompletionBlockers(wo) {
+  var blockers = [];
+  (wo.lines || []).forEach(function (l) {
+    var st = lineStatus(wo, l);
+    if (st !== 'COMPLETED') blockers.push({ lineId: l.id, line: l, status: st });
+  });
+  return blockers;
+}
+function completeWarehouseWorkLocal(woId) {
+  var w = woById(woId);
+  if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  if (!isSupervisorRole(DB.data.currentEmployee))
+    return { ok: false, err: 'SUPERVISOR ROLE REQUIRED' };
+  if (w.onHold) return { ok: false, err: 'JOB IS ON HOLD' };
+  var blockers = warehouseCompletionBlockers(w);
+  if (blockers.length) return { ok: false, err: 'MATERIAL LINES INCOMPLETE', blockers: blockers };
+  w.opStatus = 'COMPLETE';
+  w.warehouseCompletedAt = new Date().toISOString();
+  w.warehouseCompletedBy = DB.data.currentEmployee;
+  DB.save();
+  logAssignEvent('WAREHOUSE_WORK_COMPLETED', { workOrderId: w.id,
+    detail: 'Warehouse work completed by ' + DB.data.currentEmployee + '.' });
+  return { ok: true, workOrder: w };
+}
+/* Notes are append-only audit events — never overwritten. */
+function addWorkOrderNoteLocal(woId, text) {
+  var w = woById(woId);
+  if (!w) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  text = String(text || '').trim();
+  if (!text) return { ok: false, err: 'NOTE IS EMPTY' };
+  logAssignEvent('WORK_ORDER_NOTE_ADDED', { workOrderId: w.id, detail: text });
+  return { ok: true };
+}
+function woNotes(wo) {
+  return assignEventsForWO(wo.id).filter(function (e) { return e.action === 'WORK_ORDER_NOTE_ADDED'; });
+}
+
 /* Append-only audit record for every assignment action. */
-function logAssignEvent(action, o) {
-  o = o || {};
+function logAssignEvent(action, o) {  o = o || {};
   var now = new Date().toISOString();
   FG().assignmentEvents.push({
     id: aeSeq(), at: now,
@@ -612,7 +1012,7 @@ var MODULE_INFO = {
   'history':           { icon: '📜', title: 'History',
     points: ['Roll history timeline', 'History-card documents', 'Audit trail'] },
   'scheduled-jobs':    { icon: '🗓️', title: 'Scheduled Jobs',
-    points: ['Job schedule for the warehouse', 'Upcoming counts and cuts', 'Job assignments'] },
+    points: ['Daily warehouse queue: today / upcoming / in progress / completed', 'Derived job readiness — never stored', 'One-tap next actions: assign, cut, complete'] },
   'returns':           { icon: '↩️', title: 'Returns',
     points: ['Return requests', 'Inspection flow', 'Return disposition'] },
   'qa-warranty':       { icon: '🛡️', title: 'QA Request / Warranty',
@@ -908,11 +1308,27 @@ Screens.dashboard = function () {
   var wh = ['work-orders', 'sales-orders', 'assign-inventory', 'cut-roll-tracking',
             'cycle-count', 'balance', 'history'];
   var ops = ['scheduled-jobs', 'returns', 'qa-warranty', 'reports'];
+  /* Run 5: dashboard queue cards from scheduled-job data. */
+  var qc = scheduledJobCounts();
+  function qcard(n, label, tab, filter) {
+    var dest = 'scheduled-jobs/' + tab + (filter ? '/' + filter : '');
+    return '<button class="qcard" data-qroute="' + esc(dest) + '">' +
+      '<span class="qnum">' + n + '</span><span class="qlabel">' + esc(label) + '</span></button>';
+  }
+  var queueHtml =
+    '<div class="sect">TODAY\u2019S QUEUE</div>' +
+    '<div class="qcards">' +
+    qcard(qc.today, "Today's Jobs", 'TODAY') +
+    qcard(qc.inProgress, 'In Progress', 'IN PROGRESS') +
+    qcard(qc.waitingForInventory, 'Waiting for Inventory', 'TODAY', 'WAITING_FOR_INVENTORY') +
+    qcard(qc.completedToday, 'Completed Today', 'COMPLETED') +
+    '</div>';
   return {
     html:
       '<div class="screen">' +
       pageHead('Good ' + daypart() + ', ' + esc(DB.data.currentEmployee || 'team') + '.',
                todayStr() + ' · FloorGuard Ops') +
+      queueHtml +
       '<div class="sect">WAREHOUSE</div>' + tiles(wh) +
       '<div class="sect">OPERATIONS</div>' + tiles(ops) +
       '<div class="sect">SESSION</div>' +
@@ -929,6 +1345,12 @@ Screens.dashboard = function () {
         (function (b) {
           b.onclick = function () { go(b.getAttribute('data-route')); };
         })(ts[i]);
+      }
+      var qs = document.querySelectorAll('.qcard');
+      for (var j = 0; j < qs.length; j++) {
+        (function (b) {
+          b.onclick = function () { go(b.getAttribute('data-qroute')); };
+        })(qs[j]);
       }
     }
   };
@@ -983,7 +1405,7 @@ Screens.settings = function () {
       '<div class="err" id="dm-err" hidden></div>' +
       '</div>' +
       '<div class="card"><h2>About</h2>' +
-      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 4)</span></div>' +
+      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 5)</span></div>' +
       '<div class="kv"><span class="k">Storage key</span><span class="mono">' + esc(DB.KEY) + '</span></div>' +
       '<div class="kv"><span class="k">Schema</span><span class="num">v' + DB.SCHEMA + '</span></div>' +
       '</div>' +
@@ -1346,6 +1768,17 @@ Screens['work-order'] = function (param) {
       '<select class="input" id="wo-emp"><option value="">— unassigned —</option>' + empOpts + '</select></div>' +
       '<button class="btn btn-primary" id="wo-assign">SAVE ASSIGNMENT</button>' +
     '</div>' +
+    '<h2>Schedule</h2>' +
+    '<div class="card">' +
+      '<div class="kv"><span class="k">Scheduled</span><span class="v num">' +
+        (w.scheduledDate ? sjFmtDate(w.scheduledDate) + (w.scheduledTime ? ' · ' + esc(w.scheduledTime) : '') : 'Not scheduled') + '</span></div>' +
+      '<div class="kv"><span class="k">Priority</span><span class="v">' + sjPriorityChip(w.priority) + '</span></div>' +
+      '<div class="kv"><span class="k">Current step</span><span class="v"><b>' + esc(currentWarehouseStep(w).replace(/_/g, ' ')) + '</b></span></div>' +
+      '<div class="kv"><span class="k">Readiness</span><span class="v">' + sjReadinessChip(jobReadiness(w)) + '</span></div>' +
+      '<div class="kv"><span class="k">Inventory</span><span class="v">' + esc(sjInvText(w)) + '</span></div>' +
+      '<div class="kv"><span class="k">Cut status</span><span class="v">' + esc(woCutStatus(w).state) + '</span></div>' +
+      '<button class="btn" id="wo-sj">🗓️ VIEW IN SCHEDULED JOBS</button>' +
+    '</div>' +
     '<h2>Status</h2>' +
     '<div class="btn-row">' +
       '<button class="btn" id="wo-start" style="flex:1">▶ START WORK</button>' +
@@ -1374,6 +1807,7 @@ Screens['work-order'] = function (param) {
   return { html: html, mount: function () {
     $('#back').onclick = function () { history.back(); };
     if ($('#goroll')) $('#goroll').onclick = function () { go('roll', w.rollId); };
+    $('#wo-sj').onclick = function () { go('scheduled-job/' + w.id); };
     $('#wo-assign').onclick = function () {
       w.assigneeId = $('#wo-emp').value || null;
       DB.save(); good(); render();
@@ -1470,12 +1904,475 @@ function aiCompatBanner(compat) {
   return '<div class="warn-panel"><div class="big-ok">&#9888;&#65039; MATERIAL MISMATCH</div>' + rows +
     '<p class="hint">Clearly mismatched material is never assigned silently — a supervisor must approve.</p></div>';
 }
+/* ---------------- scheduled jobs / daily warehouse queue UI (Run 5) -----
+   The daily screen for warehouse employees: what is due today, what is
+   coming, what is in progress, what is done. Tabs + MY JOBS + filters +
+   job cards with one next action. All data via Repository (Run 4). */
+var SJ = null;
+function sjState() {
+  if (!SJ) SJ = { tab: 'TODAY', my: false, unassigned: false, q: '',
+    sort: 'schedule', fStatus: '', fPriority: '', fEmployee: '', fProperty: '',
+    fMaterial: '', fInv: '', jobs: null, dateFrom: '', dateTo: '' };
+  return SJ;
+}
+function sjReadinessChip(r) {
+  var cls = r === JOB_STATES.COMPLETED ? 'st-green'
+    : r === JOB_STATES.ON_HOLD ? 'st-red'
+    : r === JOB_STATES.WAITING_FOR_INVENTORY ? 'st-yellow'
+    : r === JOB_STATES.READY_TO_CUT ? 'st-green'
+    : r === JOB_STATES.IN_PROGRESS ? 'st-blue' : 'st-gray';
+  return '<span class="stchip ' + cls + '">' + esc(r) + '</span>';
+}
+function sjPriorityChip(p) {
+  p = p || 'NORMAL';
+  var cls = p === 'URGENT' ? 'st-orange' : (p === 'HIGH' ? 'st-yellow' : 'st-gray');
+  return '<span class="stchip ' + cls + '">' + esc(p) + '</span>';
+}
+function sjFmtDate(ds) {
+  if (!ds) return '—';
+  var p = ds.split('-');
+  return Number(p[1]) + '/' + Number(p[2]);
+}
+function sjGroupLabel(ds, today) {
+  if (ds === addDaysStr(today, 1)) return 'TOMORROW';
+  var diff = Math.round((dateStrToDate(ds) - dateStrToDate(today)) / 86400000);
+  if (diff >= 7) return 'NEXT WEEK';
+  return dateStrToDate(ds).toLocaleDateString([], { weekday: 'long' }).toUpperCase();
+}
+function sjInvText(wo) {
+  var ir = inventoryReadiness(wo);
+  if (typeof ir === 'string') return ir;
+  return ir.parts.map(function (p) { return p.text; }).join(' · ');
+}
+function sjMatches(wo, q) {
+  if (!q) return true;
+  q = q.toUpperCase();
+  var hay = [wo.number, wo.id, wo.property, wo.account, woAssigneeName(wo) || '']
+    .concat((wo.lines || []).map(function (l) { return (l.style || '') + ' ' + (l.color || '') + ' ' + (l.materialType || ''); }))
+    .concat((FG().inventoryAssignments || []).filter(function (a) { return a.workOrderId === wo.id; })
+      .map(function (a) { return a.rollId || ''; }))
+    .join(' ').toUpperCase();
+  return hay.indexOf(q) !== -1;
+}
+/* Apply tab + toggles + search + filters + sort. Returns display list. */
+function sjFiltered() {
+  var s = sjState(), today = warehouseToday();
+  var list = (s.jobs || []).slice();
+  var eid = currentAssigneeId();
+  if (s.tab === 'TODAY') list = list.filter(function (w) { return w.scheduledDate === today; });
+  else if (s.tab === 'UPCOMING') list = list.filter(function (w) { return w.scheduledDate && w.scheduledDate > today; });
+  else if (s.tab === 'IN PROGRESS') list = list.filter(function (w) { return jobReadiness(w) === JOB_STATES.IN_PROGRESS; });
+  else if (s.tab === 'COMPLETED') {
+    list = list.filter(function (w) { return jobReadiness(w) === JOB_STATES.COMPLETED; });
+    /* Useful recent window: last 14 days unless a date filter says otherwise. */
+    if (!s.dateFrom && !s.dateTo) {
+      var cutoff = addDaysStr(today, -14);
+      list = list.filter(function (w) {
+        return !w.warehouseCompletedAt || w.warehouseCompletedAt.slice(0, 10) >= cutoff;
+      });
+    }
+  }
+  if (s.my) list = list.filter(function (w) { return w.assigneeId && w.assigneeId === eid; });
+  if (s.unassigned) list = list.filter(function (w) { return !w.assigneeId; });
+  if (s.q) list = list.filter(function (w) { return sjMatches(w, s.q); });
+  if (s.fStatus) list = list.filter(function (w) { return jobReadiness(w) === s.fStatus; });
+  if (s.fPriority) list = list.filter(function (w) { return (w.priority || 'NORMAL') === s.fPriority; });
+  if (s.fEmployee) list = list.filter(function (w) { return w.assigneeId === s.fEmployee; });
+  if (s.fProperty) list = list.filter(function (w) { return w.property === s.fProperty; });
+  if (s.fMaterial) list = list.filter(function (w) {
+    return (w.lines || []).some(function (l) { return l.materialType === s.fMaterial; });
+  });
+  if (s.fInv) list = list.filter(function (w) {
+    var ir = sjInvText(w);
+    if (s.fInv === 'NOT ASSIGNED') return ir === 'NOT ASSIGNED';
+    if (s.fInv === 'PARTIAL') return ir.indexOf('NOT ASSIGNED') >= 0 && ir !== 'NOT ASSIGNED';
+    if (s.fInv === 'COMPLETE') return ir.indexOf('NOT ASSIGNED') < 0 && ir.indexOf('RESERVED') < 0;
+    return true;
+  });
+  if (s.dateFrom) list = list.filter(function (w) { return w.scheduledDate && w.scheduledDate >= s.dateFrom; });
+  if (s.dateTo) list = list.filter(function (w) { return w.scheduledDate && w.scheduledDate <= s.dateTo; });
+  var priRank = function (w) { return w.priority === 'URGENT' ? 0 : (w.priority === 'HIGH' ? 1 : 2); };
+  var byNum = function (a, b) { return String(a.number).localeCompare(String(b.number)); };
+  list.sort(function (a, b) {
+    if (s.sort === 'property') return String(a.property).localeCompare(String(b.property)) || byNum(a, b);
+    if (s.sort === 'status') return jobReadiness(a).localeCompare(jobReadiness(b)) || byNum(a, b);
+    if (s.sort === 'employee') return String(woAssigneeName(a) || '').localeCompare(String(woAssigneeName(b) || '')) || byNum(a, b);
+    if (s.sort === 'wo') return byNum(a, b);
+    /* schedule: priority, then time, then WO number */
+    var pr = priRank(a) - priRank(b); if (pr) return pr;
+    var ta = a.scheduledTime || '', tb = b.scheduledTime || '';
+    if (ta !== tb) return ta < tb ? -1 : 1;
+    var da = a.scheduledDate || '', db = b.scheduledDate || '';
+    if (da !== db) return da < db ? -1 : 1;
+    return byNum(a, b);
+  });
+  return list;
+}
+function sjJobCard(wo) {
+  var r = jobReadiness(wo);
+  var qa = jobQuickAction(wo);
+  var emp = woAssigneeName(wo);
+  var lines = (wo.lines || []).map(function (l) {
+    return esc(l.style || '') + ' / ' + esc(l.color || '');
+  }).join(' · ');
+  var qty = (wo.lines || []).map(function (l) { return fmtLen(l.requiredIn || 0); }).join(' + ');
+  var mat = ((wo.lines || [])[0] || {}).materialType || '';
+  var ir = inventoryReadiness(wo);
+  var invHtml;
+  if (typeof ir === 'string') {
+    invHtml = '<span class="stchip st-yellow">' + esc(ir) + '</span>';
+  } else {
+    invHtml = ir.parts.map(function (p) {
+      var inner = p.rollId
+        ? '<button class="linkbtn" data-roll="' + esc(p.rollId) + '">ROLL ' + esc(p.rollId) + '</button>' +
+          (p.text.indexOf('·') >= 0 ? ' · ' + esc(p.text.split('·')[1].trim()) : '')
+        : esc(p.text);
+      return '<span class="stchip ' + p.cls + '">' + inner + '</span>';
+    }).join(' ');
+  }
+  var sched = wo.scheduledDate ? sjFmtDate(wo.scheduledDate) + (wo.scheduledTime ? ' · ' + esc(wo.scheduledTime) : '') : '—';
+  return '<div class="card sjcard" data-job="' + esc(wo.id) + '">' +
+    '<div class="rhead"><b class="mono big">' + esc(wo.number) + '</b> ' + sjPriorityChip(wo.priority) + ' ' + sjReadinessChip(r) + '</div>' +
+    '<div class="sub"><b>' + esc(wo.property) + '</b> · ' + esc(wo.account) + '</div>' +
+    '<div class="sub">' + lines + '</div>' +
+    '<div class="sub">' + esc(mat) + ' · <b class="num">' + esc(qty) + '</b></div>' +
+    '<div class="kv"><span class="k">Inventory</span><span>' + invHtml + '</span></div>' +
+    '<div class="kv"><span class="k">Worker</span><span>' + (emp ? '<b>' + esc(emp) + '</b>' : '<span class="stchip st-yellow">UNASSIGNED</span>') + '</span></div>' +
+    '<div class="kv"><span class="k">Scheduled</span><span class="num">' + sched + '</span></div>' +
+    '<div class="btn-row"><button class="btn btn-primary" data-qa="' + esc(wo.id) + '" style="flex:1">' + esc(qa.label) + '</button>' +
+    '<button class="btn" data-detail="' + esc(wo.id) + '">DETAIL</button></div>' +
+    '</div>';
+}
+function sjTabCounts() {
+  var s = sjState(), today = warehouseToday(), jobs = s.jobs || [];
+  var c = { TODAY: 0, UPCOMING: 0, 'IN PROGRESS': 0, COMPLETED: 0 };
+  jobs.forEach(function (w) {
+    if (w.scheduledDate === today) c.TODAY++;
+    if (w.scheduledDate && w.scheduledDate > today) c.UPCOMING++;
+    if (jobReadiness(w) === JOB_STATES.IN_PROGRESS) c['IN PROGRESS']++;
+    if (jobReadiness(w) === JOB_STATES.COMPLETED) c.COMPLETED++;
+  });
+  return c;
+}
+Screens['scheduled-jobs'] = function (param) {
+  var s = sjState();
+  /* Route param: TAB or TAB/STATUSFILTER, e.g. scheduled-jobs/TODAY */
+  var parts = String(param || '').split('/');
+  var tab = (parts[0] || '').toUpperCase();
+  if (['TODAY', 'UPCOMING', 'IN PROGRESS', 'COMPLETED'].indexOf(tab) >= 0) s.tab = tab;
+  if (parts[1]) s.fStatus = decodeURIComponent(parts[1]).toUpperCase().replace(/_/g, ' ');
+  var isSup = isSupervisorRole(DB.data.currentEmployee);
+  var emps = (DB.data.employees || []).map(function (e, i) { return { id: 'e' + (i + 1), name: e }; });
+  var props = [], mats = [];
+  (s.jobs || []).forEach(function (w) {
+    if (w.property && props.indexOf(w.property) < 0) props.push(w.property);
+    (w.lines || []).forEach(function (l) {
+      if (l.materialType && mats.indexOf(l.materialType) < 0) mats.push(l.materialType);
+    });
+  });
+  function opt(v, label, cur) {
+    return '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(label) + '</option>';
+  }
+  var tabs = ['TODAY', 'UPCOMING', 'IN PROGRESS', 'COMPLETED'].map(function (t) {
+    return '<button class="fchip' + (t === s.tab ? ' on' : '') + '" data-tab="' + t + '">' + t +
+      ' <b class="badge" data-badge="' + t + '"></b></button>';
+  }).join('');
+  var html =
+    '<div class="screen">' +
+    pageHead('🗓️ Scheduled Jobs', 'The daily warehouse queue') +
+    '<div class="chiprow">' + tabs + '</div>' +
+    '<div class="chiprow">' +
+      '<button class="fchip' + (s.my ? ' on' : '') + '" data-my="1">MY JOBS</button>' +
+      (isSup ? '<button class="fchip' + (s.unassigned ? ' on' : '') + '" data-un="1">UNASSIGNED</button>' : '') +
+      '<button class="btn btn-small" id="sj-refresh" style="margin-left:auto">⟳ REFRESH</button>' +
+    '</div>' +
+    '<div class="card"><div class="field"><label class="label" for="sj-q">SEARCH</label>' +
+    '<input class="input" id="sj-q" placeholder="Work order · property · roll · employee" value="' + esc(s.q) + '"></div>' +
+    '<div class="frow">' +
+      '<div class="field"><label class="label">STATUS</label><select class="input" id="sj-fstatus">' +
+        opt('', 'All', s.fStatus) + Object.keys(JOB_STATES).map(function (k) { return opt(JOB_STATES[k], JOB_STATES[k], s.fStatus); }).join('') + '</select></div>' +
+      '<div class="field"><label class="label">PRIORITY</label><select class="input" id="sj-fpri">' +
+        opt('', 'All', s.fPriority) + ['NORMAL', 'HIGH', 'URGENT'].map(function (p) { return opt(p, p, s.fPriority); }).join('') + '</select></div>' +
+    '</div>' +
+    '<div class="frow">' +
+      '<div class="field"><label class="label">EMPLOYEE</label><select class="input" id="sj-femp">' +
+        opt('', 'All', s.fEmployee) + emps.map(function (e) { return opt(e.id, e.name, s.fEmployee); }).join('') + '</select></div>' +
+      '<div class="field"><label class="label">SORT</label><select class="input" id="sj-sort">' +
+        opt('schedule', 'Schedule', s.sort) + opt('property', 'Property', s.sort) +
+        opt('status', 'Status', s.sort) + opt('employee', 'Employee', s.sort) +
+        opt('wo', 'Work Order', s.sort) + '</select></div>' +
+    '</div>' +
+    '<div class="frow">' +
+      '<div class="field"><label class="label">PROPERTY</label><select class="input" id="sj-fprop">' +
+        opt('', 'All', s.fProperty) + props.map(function (p) { return opt(p, p, s.fProperty); }).join('') + '</select></div>' +
+      '<div class="field"><label class="label">INVENTORY</label><select class="input" id="sj-finv">' +
+        opt('', 'All', s.fInv) + opt('NOT ASSIGNED', 'Not assigned', s.fInv) +
+        opt('PARTIAL', 'Partial', s.fInv) + opt('COMPLETE', 'Complete', s.fInv) + '</select></div>' +
+    '</div>' +
+    (s.tab === 'COMPLETED'
+      ? '<div class="frow"><div class="field"><label class="label">FROM</label><input class="input" type="date" id="sj-dfrom" value="' + esc(s.dateFrom) + '"></div>' +
+        '<div class="field"><label class="label">TO</label><input class="input" type="date" id="sj-dto" value="' + esc(s.dateTo) + '"></div></div>'
+      : '') +
+    '</div>' +
+    '<div id="sj-body"><p class="hint center">Loading jobs…</p></div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    function paint() {
+      var st = sjState(), today = warehouseToday();
+      var list = sjFiltered();
+      var counts = sjTabCounts();
+      Array.prototype.forEach.call(document.querySelectorAll('[data-badge]'), function (b) {
+        b.textContent = counts[b.getAttribute('data-badge')] || 0;
+      });
+      var body = $('#sj-body');
+      if (!list.length) {
+        body.innerHTML = '<p class="hint center">No jobs in this view.</p>';
+        return;
+      }
+      if (st.tab === 'UPCOMING') {
+        /* Group by date: TOMORROW / weekday / NEXT WEEK. */
+        var groups = {};
+        list.forEach(function (w) {
+          var g = sjGroupLabel(w.scheduledDate, today);
+          (groups[g] = groups[g] || []).push(w);
+        });
+        body.innerHTML = Object.keys(groups).map(function (g) {
+          return '<div class="sect">' + esc(g) + '</div>' +
+            groups[g].map(sjJobCard).join('');
+        }).join('');
+      } else {
+        body.innerHTML = list.map(sjJobCard).join('');
+      }
+      Array.prototype.forEach.call(body.querySelectorAll('[data-qa]'), function (b) {
+        b.onclick = function (e) {
+          e.stopPropagation();
+          var w = woById(b.getAttribute('data-qa'));
+          if (w) go(jobQuickAction(w).route);
+        };
+      });
+      Array.prototype.forEach.call(body.querySelectorAll('[data-detail]'), function (b) {
+        b.onclick = function (e) { e.stopPropagation(); go('scheduled-job/' + b.getAttribute('data-detail')); };
+      });
+      Array.prototype.forEach.call(body.querySelectorAll('[data-job]'), function (c) {
+        c.onclick = function () { go('scheduled-job/' + c.getAttribute('data-job')); };
+      });
+      Array.prototype.forEach.call(body.querySelectorAll('[data-roll]'), function (b) {
+        b.onclick = function (e) { e.stopPropagation(); go('roll/' + b.getAttribute('data-roll')); };
+      });
+    }
+    function reload() {
+      $('#sj-body').innerHTML = '<p class="hint center">Loading jobs…</p>';
+      Repository.getScheduledJobs().then(function (jobs) {
+        sjState().jobs = jobs; paint();
+      }).catch(function (err) {
+        $('#sj-body').innerHTML = '<div class="err center">' + esc((err && err.message) || 'Could not load jobs.') + '</div>';
+      });
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tab]'), function (b) {
+      b.onclick = function () { sjState().tab = b.getAttribute('data-tab'); render(); };
+    });
+    var myB = document.querySelector('[data-my]');
+    if (myB) myB.onclick = function () { sjState().my = !sjState().my; render(); };
+    var unB = document.querySelector('[data-un]');
+    if (unB) unB.onclick = function () { sjState().unassigned = !sjState().unassigned; render(); };
+    $('#sj-refresh').onclick = function () {
+      Repository.refresh().then(reload).catch(reload);
+    };
+    var q = $('#sj-q');
+    var qt = null;
+    q.oninput = function () { clearTimeout(qt); qt = setTimeout(function () { sjState().q = q.value; paint(); }, 250); };
+    $('#sj-fstatus').onchange = function (e) { sjState().fStatus = e.target.value; paint(); };
+    $('#sj-fpri').onchange = function (e) { sjState().fPriority = e.target.value; paint(); };
+    $('#sj-femp').onchange = function (e) { sjState().fEmployee = e.target.value; paint(); };
+    $('#sj-fprop').onchange = function (e) { sjState().fProperty = e.target.value; paint(); };
+    $('#sj-finv').onchange = function (e) { sjState().fInv = e.target.value; paint(); };
+    $('#sj-sort').onchange = function (e) { sjState().sort = e.target.value; paint(); };
+    var df = $('#sj-dfrom'), dt = $('#sj-dto');
+    if (df) df.onchange = function (e) { sjState().dateFrom = e.target.value; paint(); };
+    if (dt) dt.onchange = function (e) { sjState().dateTo = e.target.value; paint(); };
+    reload();
+  }};
+};
+
+/* Job detail: scheduling-focused view of one work order. Reuses the Work
+   Order record — no duplicate job database. */
+Screens['scheduled-job'] = function (param) {
+  var w = woById(param);
+  if (!w) { setTimeout(function () { go('scheduled-jobs'); }, 0); return { html: '' }; }
+  var r = jobReadiness(w);
+  var step = currentWarehouseStep(w);
+  var cs = woCutStatus(w);
+  var emp = woAssigneeName(w);
+  var isSup = isSupervisorRole(DB.data.currentEmployee);
+  var notes = woNotes(w);
+  var evts = assignEventsForWO(w.id);
+  var blockers = warehouseCompletionBlockers(w);
+  var qa = jobQuickAction(w);
+  var linesHtml = (w.lines || []).map(function (l) {
+    var lp = lineProgress(w, l);
+    var cls = lp === 'CUT COMPLETE' ? 'st-green' : (lp === 'WAITING FOR INVENTORY' ? 'st-yellow' : 'st-blue');
+    var act = activeAssignments(w.id, l.id);
+    var lineAction = lp === 'WAITING FOR INVENTORY' || lp === 'INVENTORY ASSIGNED'
+      ? '<button class="btn btn-small" data-lineassign="' + esc(l.id) + '">ASSIGN INVENTORY</button>'
+      : (act.length === 1 ? '<button class="btn btn-small btn-primary" data-linecut="' + esc(act[0].id) + '">CONTINUE TO CUT</button>' : '');
+    return '<div class="card"><div class="rhead"><b>' + esc(l.style || '') + ' / ' + esc(l.color || '') + '</b> ' +
+      '<span class="stchip ' + cls + '">' + (lp === 'CUT COMPLETE' ? '✓ ' : '') + esc(lp) + '</span></div>' +
+      '<div class="sub">' + esc(l.materialType || '') + ' · required <b class="num">' + fmtLen(l.requiredIn || 0) + '</b></div>' +
+      (lineAction ? '<div class="btn-row">' + lineAction + '</div>' : '') + '</div>';
+  }).join('');
+  var asnHtml = (function () {
+    var recs = [];
+    (w.lines || []).forEach(function (l) {
+      allAssignmentsForLine(w.id, l.id).forEach(function (a) {
+        if (a.status === AI_STATUS.RESERVED) recs.push({ a: a, line: l });
+      });
+    });
+    if (!recs.length) return '<p class="hint">No inventory assigned yet.</p>';
+    return recs.map(function (x) {
+      var roll = rollById(x.a.rollId);
+      var loc = (roll && roll.expectedLocation) || x.a.location || '—';
+      return '<div class="trow"><div><b class="mono">' + esc(x.a.rollId) + '</b>' +
+        '<div class="sub">' + esc(x.line.style || '') + ' · reserved <b class="num">' + fmtLen(x.a.reservedIn || 0) + '</b> · loc ' + esc(loc) + '</div></div>' +
+        '<div><button class="btn btn-small" data-roll="' + esc(x.a.rollId) + '">VIEW ROLL</button></div></div>';
+    }).join('');
+  })();
+  var cutsHtml = cs.cuts.length ? cs.cuts.map(function (c) {
+    return '<div class="trow"><div><b class="mono">' + esc(c.rollId) + '</b>' +
+      '<div class="sub">cut <b class="num">' + fmtLen(c.inches) + '</b> · ' + esc(c.by) + ' · ' + fmtDT(c.at) + '</div></div></div>';
+  }).join('') : '<p class="hint">No cuts recorded yet.</p>';
+  var notesHtml = notes.length ? notes.map(function (n) {
+    return '<div class="trow"><div>' + esc(n.detail) + '</div><div class="sub">' + esc(n.user) + '<br>' + fmtDT(n.at) + '</div></div>';
+  }).join('') : '<p class="hint">No notes yet.</p>';
+  var actHtml = evts.length ? evts.map(function (e) {
+    return '<div class="trow"><div><b>' + esc(aiEventLabel(e.action)) + '</b>' +
+      (e.rollId ? ' <span class="mono">' + esc(e.rollId) + '</span>' : '') +
+      (e.detail ? '<div class="sub">' + esc(e.detail) + '</div>' : '') + '</div>' +
+      '<div class="sub">' + esc(e.user) + '<br>' + fmtDT(e.at) + '</div></div>';
+  }).join('') : '<p class="hint">No activity yet.</p>';
+  var sched = w.scheduledDate ? sjFmtDate(w.scheduledDate) + (w.scheduledTime ? ' · ' + esc(w.scheduledTime) : '') : 'Not scheduled';
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← SCHEDULED JOBS</button>' +
+    '<div class="step-head">SCHEDULED JOB</div>' +
+    '<h1 class="mono">' + esc(w.number) + '</h1>' +
+    '<div>' + sjPriorityChip(w.priority) + ' ' + sjReadinessChip(r) + '</div>' +
+    (w.onHold ? '<div class="warn-panel"><div class="big-ok">⏸ ON HOLD</div><p class="hint">' + esc(w.holdReason || '') +
+      (w.holdBy ? ' · by ' + esc(w.holdBy) : '') + '</p></div>' : '') +
+    '<div class="card">' +
+      '<div class="kv"><span class="k">Scheduled</span><span class="v num">' + sched + '</span></div>' +
+      '<div class="kv"><span class="k">Property</span><span class="v">' + esc(w.property) + '</span></div>' +
+      '<div class="kv"><span class="k">Account</span><span class="v">' + esc(w.account) + '</span></div>' +
+      '<div class="kv"><span class="k">Employee</span><span class="v">' + (emp ? '<b>' + esc(emp) + '</b>' : '<span class="stchip st-yellow">UNASSIGNED</span>') + '</span></div>' +
+      '<div class="kv"><span class="k">Current step</span><span class="v"><b>' + esc(step.replace(/_/g, ' ')) + '</b></span></div>' +
+      '<div class="kv"><span class="k">Cut status</span><span class="v">' + esc(cs.state) +
+        (cs.cutIn ? ' · <b class="num">' + fmtLen(cs.cutIn) + '</b>' : '') + '</span></div>' +
+      (w.warehouseCompletedAt ? '<div class="kv"><span class="k">Completed</span><span class="v">' + esc(w.warehouseCompletedBy || '') + ' · ' + fmtDT(w.warehouseCompletedAt) + '</span></div>' : '') +
+    '</div>' +
+    '<div class="btn-row"><button class="btn btn-primary" id="sj-qa" style="flex:1">' + esc(qa.label) + '</button>' +
+    '<button class="btn" id="sj-wo">WORK ORDER</button></div>' +
+    '<h2>Material lines</h2>' + (linesHtml || '<p class="hint">No material lines.</p>') +
+    '<h2>Inventory assignments</h2><div class="card">' + asnHtml + '</div>' +
+    '<h2>Cut status</h2><div class="card">' + cutsHtml + '</div>' +
+    '<h2>Actions</h2><div class="card">' +
+      '<div class="btn-row">' +
+      (w.opStatus !== 'IN_PROGRESS' && r !== JOB_STATES.COMPLETED ? '<button class="btn" id="sj-start" style="flex:1">▶ START WORK</button>' : '') +
+      (isSup && !w.onHold && r !== JOB_STATES.COMPLETED ? '<button class="btn" id="sj-hold" style="flex:1">⏸ HOLD</button>' : '') +
+      (isSup && w.onHold ? '<button class="btn btn-primary" id="sj-resume" style="flex:1">▶ RESUME JOB</button>' : '') +
+      '</div>' +
+      (isSup ? '<div class="field"><label class="label" for="sj-emp">ASSIGN EMPLOYEE</label><div class="frow">' +
+        '<select class="input" id="sj-emp" style="flex:1"><option value="">— unassigned —</option>' +
+        DB.data.employees.map(function (e, i) {
+          var eid = 'e' + (i + 1);
+          return '<option value="' + eid + '"' + (w.assigneeId === eid ? ' selected' : '') + '>' + esc(e) + '</option>';
+        }).join('') + '</select>' +
+        '<button class="btn btn-primary" id="sj-assign">SAVE</button></div></div>' : '') +
+      (isSup && r !== JOB_STATES.COMPLETED
+        ? '<button class="btn btn-primary btn-huge" id="sj-complete">✔ COMPLETE WAREHOUSE WORK</button>' +
+          (blockers.length ? '<p class="hint">Blocked: ' + blockers.map(function (b) {
+              return esc(b.lineId) + ' (' + esc(b.status) + ')';
+            }).join(', ') + '</p>' : '<p class="hint">All material lines complete — ready to close out.</p>')
+        : '') +
+    '</div>' +
+    '<h2>Notes</h2><div class="card">' + notesHtml +
+      '<div class="field"><label class="label" for="sj-note">ADD NOTE</label>' +
+      '<div class="frow"><input class="input" id="sj-note" style="flex:1" placeholder="Warehouse note…">' +
+      '<button class="btn btn-primary" id="sj-addnote">ADD</button></div></div></div>' +
+    '<h2>Activity</h2><div class="card">' + actHtml + '</div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    function afterMutation(p, okMsg) {
+      return p.then(function (res) {
+        if (!res || res.ok === false) { bad(); toast((res && res.err) || 'Action failed.'); return; }
+        good(); if (okMsg) toast(okMsg);
+        return Repository.refresh({ quiet: true }).catch(function () {}).then(render);
+      }).catch(function (err) {
+        bad();
+        toast((err && err.code === 'OFFLINE') ? 'OFFLINE — not synced. Will not pretend success.' : ((err && err.message) || 'Action failed.'));
+      });
+    }
+    $('#back').onclick = function () { go('scheduled-jobs', sjState().tab); };
+    $('#sj-qa').onclick = function () { go(qa.route); };
+    $('#sj-wo').onclick = function () { go('work-order/' + w.id); };
+    var st = $('#sj-start');
+    if (st) st.onclick = function () { afterMutation(Repository.startWarehouseWork(w.id), 'Work started.'); };
+    var hd = $('#sj-hold');
+    if (hd) hd.onclick = function () {
+      var reasons = ['MATERIAL NOT FOUND', 'INSUFFICIENT MATERIAL', 'ORDER ISSUE', 'MANAGER REVIEW', 'OTHER'];
+      var wrap = document.createElement('div');
+      wrap.className = 'modal-wrap';
+      wrap.innerHTML = '<div class="modal" role="dialog" aria-modal="true"><h2>Hold ' + esc(w.number) + '?</h2>' +
+        '<div class="field"><label class="label">REASON (required)</label><select class="input" id="hold-reason">' +
+        reasons.map(function (x) { return '<option>' + x + '</option>'; }).join('') + '</select></div>' +
+        '<button class="btn btn-primary" id="hold-ok">PLACE ON HOLD</button> ' +
+        '<button class="btn" id="hold-cancel">CANCEL</button></div>';
+      document.body.appendChild(wrap);
+      wrap.querySelector('#hold-cancel').onclick = function () { wrap.remove(); };
+      wrap.querySelector('#hold-ok').onclick = function () {
+        var reason = wrap.querySelector('#hold-reason').value;
+        wrap.remove();
+        afterMutation(Repository.setJobHold(w.id, reason), 'Job placed on hold.');
+      };
+    };
+    var rs = $('#sj-resume');
+    if (rs) rs.onclick = function () { afterMutation(Repository.resumeJob(w.id), 'Job resumed.'); };
+    var as = $('#sj-assign');
+    if (as) as.onclick = function () {
+      afterMutation(Repository.assignEmployee(w.id, $('#sj-emp').value || null), 'Assignment saved.');
+    };
+    var cp = $('#sj-complete');
+    if (cp) cp.onclick = function () {
+      showConfirm({ title: 'Complete warehouse work for ' + w.number + '?',
+        body: 'All material lines are complete. This closes the warehouse job.',
+        okLabel: 'COMPLETE' }).then(function (ok) {
+        if (ok) afterMutation(Repository.completeWarehouseWork(w.id), 'Warehouse work completed.');
+      });
+    };
+    $('#sj-addnote').onclick = function () {
+      var t = $('#sj-note').value;
+      afterMutation(Repository.addWorkOrderNote(w.id, t), 'Note added.');
+    };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-roll]'), function (b) {
+      b.onclick = function () { go('roll/' + b.getAttribute('data-roll')); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-lineassign]'), function (b) {
+      b.onclick = function () { go('assign-inventory/wo/' + w.id); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-linecut]'), function (b) {
+      b.onclick = function () { go('assign-inventory/a/' + b.getAttribute('data-linecut')); };
+    });
+  }};
+};
+
 function aiEventLabel(action) {
   var map = { INVENTORY_ASSIGNED: 'INVENTORY ASSIGNED', INVENTORY_RELEASED: 'INVENTORY RELEASED',
     ROLL_VERIFIED: 'ROLL VERIFIED', LOCATION_VERIFIED: 'LOCATION VERIFIED',
     OVER_RESERVATION_APPROVED: 'OVER-RESERVATION APPROVED',
     MATERIAL_MISMATCH_OVERRIDE: 'MATERIAL MISMATCH OVERRIDE',
-    ASSIGNMENT_CONSUMED: 'ASSIGNMENT CONSUMED', ROLL_VERIFICATION_OVERRIDDEN: 'ROLL VERIFICATION OVERRIDDEN' };
+    ASSIGNMENT_CONSUMED: 'ASSIGNMENT CONSUMED', ROLL_VERIFICATION_OVERRIDDEN: 'ROLL VERIFICATION OVERRIDDEN',
+    JOB_HELD: 'JOB PLACED ON HOLD', JOB_RESUMED: 'JOB RESUMED',
+    WAREHOUSE_WORK_STARTED: 'WAREHOUSE WORK STARTED',
+    WAREHOUSE_WORK_COMPLETED: 'WAREHOUSE WORK COMPLETED',
+    WORK_ORDER_NOTE_ADDED: 'NOTE', EMPLOYEE_ASSIGNED: 'EMPLOYEE ASSIGNED' };
   return map[action] || action;
 }
 function rollLastCut(rollId) {

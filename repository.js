@@ -270,7 +270,13 @@ var Mappers = {
       opStatus: w.status || 'OPEN',
       assignmentStatus: w.assignment_status || 'UNASSIGNED',
       assigneeId: w.assignee_id || null,
-      scheduledDate: w.scheduled_date || null, notes: w.notes || '',
+      scheduledDate: w.scheduled_date || null, scheduledTime: w.scheduled_time || null,
+      priority: w.priority || 'NORMAL',
+      onHold: !!w.on_hold, holdReason: w.hold_reason || null, holdAt: w.hold_at || null,
+      holdBy: w.hold_by || null,
+      warehouseCompletedAt: w.warehouse_completed_at || null,
+      warehouseCompletedBy: w.warehouse_completed_by || null,
+      notes: w.notes || '',
       createdAt: w.created_at, lines: ls
     };
   },
@@ -281,7 +287,13 @@ var Mappers = {
       status: wo.opStatus || 'OPEN',
       assignment_status: wo.assignmentStatus || 'UNASSIGNED',
       assignee_id: wo.assigneeId || null,
-      scheduled_date: wo.scheduledDate || null, notes: wo.notes || null
+      scheduled_date: wo.scheduledDate || null, scheduled_time: wo.scheduledTime || null,
+      priority: wo.priority || 'NORMAL',
+      on_hold: !!wo.onHold, hold_reason: wo.holdReason || null,
+      hold_at: wo.holdAt || null, hold_by: wo.holdBy || null,
+      warehouse_completed_at: wo.warehouseCompletedAt || null,
+      warehouse_completed_by: wo.warehouseCompletedBy || null,
+      notes: wo.notes || null
     };
   },
   lineToRow: function (line, workOrderId) {
@@ -396,6 +408,16 @@ var LocalRepo = {
   getWorkOrder: function (id) { return Promise.resolve(woById(id)); },
   assignInventory: function (o) { return Promise.resolve(assignInventory(o)); },
   releaseInventory: function (assignId, by) { return Promise.resolve(releaseAssignment(assignId, by)); },
+  /* ---- Run 5: scheduled jobs / daily warehouse queue ---- */
+  getScheduledJobs: function () { return Promise.resolve(scheduledJobs()); },
+  getJobsForDate: function (ds) { return Promise.resolve(jobsForDate(ds)); },
+  getMyScheduledJobs: function () { return Promise.resolve(myScheduledJobs()); },
+  setJobHold: function (woId, reason) { return Promise.resolve(setJobHoldLocal(woId, reason)); },
+  resumeJob: function (woId) { return Promise.resolve(resumeJobLocal(woId)); },
+  startWarehouseWork: function (woId) { return Promise.resolve(startWarehouseWorkLocal(woId)); },
+  assignEmployee: function (woId, assigneeId) { return Promise.resolve(assignEmployeeLocal(woId, assigneeId)); },
+  completeWarehouseWork: function (woId) { return Promise.resolve(completeWarehouseWorkLocal(woId)); },
+  addWorkOrderNote: function (woId, text) { return Promise.resolve(addWorkOrderNoteLocal(woId, text)); },
   getRoll: function (id) { return Promise.resolve(rollById(id)); },
   getRollHistory: function (id) { return Promise.resolve(buildLocalRollHistory(id)); },
   recordCut: function (o) { return Promise.resolve(CutService.recordCut(o)); },
@@ -584,6 +606,138 @@ var SharedRepo = {
       if (!parts[0].length) return null;
       return Mappers.rowToWorkOrder(parts[0][0], parts[1]);
     });
+  },
+
+  /* ---- Run 5: scheduled jobs / daily warehouse queue ----
+     Reads: refresh the hydrated mirror (cached queue is acceptable
+     offline), then derive from the in-memory store — the same derivation
+     local mode uses. Writes: validate with local rules, PATCH the
+     work_orders row, append an audit_events row, then mirror locally so
+     screens re-render instantly. Offline writes fail fast via pgFetch's
+     preflight — a hold/completion/assignment/note NEVER pretends to sync. */
+  _refreshJobs: function () {
+    var self = this;
+    return self.hydrate().catch(function () { return null; /* offline: use cached */ })
+      .then(function () { return true; });
+  },
+  getScheduledJobs: function () {
+    return this._refreshJobs().then(function () { return scheduledJobs(); });
+  },
+  getJobsForDate: function (ds) {
+    return this._refreshJobs().then(function () { return jobsForDate(ds); });
+  },
+  getMyScheduledJobs: function () {
+    return this._refreshJobs().then(function () { return myScheduledJobs(); });
+  },
+  _woAudit: function (action, wo, extra) {
+    var e = {
+      id: rid('A'), user_id: null, user_name: DB.data.currentEmployee || null,
+      warehouse_id: this.wh(), action: action, entity_type: 'work_order',
+      entity_id: wo.id, related_work_order_id: wo.id, related_roll_id: null,
+      old_value: null, new_value: extra || null, created_at: isoNow()
+    };
+    return this._post('audit_events', [e]).then(function () { return e; });
+  },
+  _validateJobWrite: function (woId, needSupervisor) {
+    var w = woById(woId);
+    if (!w) throw RepoError('NOT_FOUND', 'Work order not found.');
+    if (needSupervisor && !isSupervisorRole(DB.data.currentEmployee))
+      throw RepoError('FORBIDDEN', 'Supervisor role required.');
+    return w;
+  },
+  setJobHold: function (woId, reason) {
+    var self = this;
+    var w = self._validateJobWrite(woId, true);
+    if (w.onHold) throw RepoError('INVALID_INPUT', 'Job is already on hold.');
+    reason = String(reason || 'OTHER').toUpperCase();
+    var patch = { on_hold: true, hold_reason: reason, hold_at: isoNow(), hold_by: DB.data.currentEmployee };
+    return self._patch('work_orders', 'id=eq.' + encodeURIComponent(woId), patch)
+      .then(function () { return self._woAudit('JOB_HELD', w, { reason: reason }); })
+      .then(function () {
+        w.onHold = true; w.holdReason = reason; w.holdAt = patch.hold_at; w.holdBy = patch.hold_by;
+        DB.save();
+        logAssignEvent('JOB_HELD', { workOrderId: w.id, detail: 'Job placed ON HOLD: ' + reason });
+        return { ok: true, workOrder: w };
+      });
+  },
+  resumeJob: function (woId) {
+    var self = this;
+    var w = self._validateJobWrite(woId, true);
+    if (!w.onHold) throw RepoError('INVALID_INPUT', 'Job is not on hold.');
+    var patch = { on_hold: false, hold_reason: null, hold_at: null, hold_by: null };
+    return self._patch('work_orders', 'id=eq.' + encodeURIComponent(woId), patch)
+      .then(function () { return self._woAudit('JOB_RESUMED', w, null); })
+      .then(function () {
+        w.onHold = false; w.holdReason = null; w.holdAt = null; w.holdBy = null;
+        DB.save();
+        logAssignEvent('JOB_RESUMED', { workOrderId: w.id, detail: 'Job resumed from hold.' });
+        return { ok: true, workOrder: w };
+      });
+  },
+  startWarehouseWork: function (woId) {
+    var self = this;
+    var w = self._validateJobWrite(woId, false);
+    if (w.onHold) throw RepoError('INVALID_INPUT', 'Job is on hold.');
+    return self._patch('work_orders', 'id=eq.' + encodeURIComponent(woId), { status: 'IN_PROGRESS' })
+      .then(function () { return self._woAudit('WAREHOUSE_WORK_STARTED', w, null); })
+      .then(function () {
+        w.opStatus = 'IN_PROGRESS';
+        w.startedAt = w.startedAt || isoNow(); w.startedBy = w.startedBy || DB.data.currentEmployee;
+        DB.save();
+        logAssignEvent('WAREHOUSE_WORK_STARTED', { workOrderId: w.id, detail: 'Warehouse work started.' });
+        return { ok: true, workOrder: w };
+      });
+  },
+  assignEmployee: function (woId, assigneeId) {
+    var self = this;
+    var w = self._validateJobWrite(woId, false);
+    return self._patch('work_orders', 'id=eq.' + encodeURIComponent(woId), { assignee_id: assigneeId || null })
+      .then(function () { return self._woAudit('EMPLOYEE_ASSIGNED', w, { assignee_id: assigneeId || null }); })
+      .then(function () {
+        w.assigneeId = assigneeId || null;
+        DB.save();
+        var nm = woAssigneeName(w);
+        logAssignEvent('EMPLOYEE_ASSIGNED', { workOrderId: w.id,
+          detail: nm ? 'Assigned to ' + nm + '.' : 'Unassigned.' });
+        return { ok: true, workOrder: w };
+      });
+  },
+  completeWarehouseWork: function (woId) {
+    var self = this;
+    var w = self._validateJobWrite(woId, true);
+    if (w.onHold) throw RepoError('INVALID_INPUT', 'Job is on hold.');
+    /* Guard against fresh backend state: hydrate first, then run the same
+       completion guard local mode uses. */
+    return self._refreshJobs().then(function () {
+      var fresh = woById(woId);
+      if (!fresh) throw RepoError('NOT_FOUND', 'Work order not found.');
+      var blockers = warehouseCompletionBlockers(fresh);
+      if (blockers.length)
+        throw RepoError('LINES_INCOMPLETE', 'Material lines incomplete.',
+          { blockers: blockers.map(function (b) { return b.lineId + ':' + b.status; }) });
+      var at = isoNow(), by = DB.data.currentEmployee;
+      return self._patch('work_orders', 'id=eq.' + encodeURIComponent(woId),
+          { status: 'COMPLETE', warehouse_completed_at: at, warehouse_completed_by: by })
+        .then(function () { return self._woAudit('WAREHOUSE_WORK_COMPLETED', fresh, null); })
+        .then(function () {
+          fresh.opStatus = 'COMPLETE'; fresh.warehouseCompletedAt = at; fresh.warehouseCompletedBy = by;
+          DB.save();
+          logAssignEvent('WAREHOUSE_WORK_COMPLETED', { workOrderId: fresh.id,
+            detail: 'Warehouse work completed by ' + by + '.' });
+          return { ok: true, workOrder: fresh };
+        });
+    });
+  },
+  addWorkOrderNote: function (woId, text) {
+    var self = this;
+    var w = self._validateJobWrite(woId, false);
+    text = String(text || '').trim();
+    if (!text) throw RepoError('INVALID_INPUT', 'Note is empty.');
+    return self._woAudit('WORK_ORDER_NOTE_ADDED', w, { text: text })
+      .then(function () {
+        logAssignEvent('WORK_ORDER_NOTE_ADDED', { workOrderId: w.id, detail: text });
+        return { ok: true };
+      });
   },
 
   /* ---- rolls ---- */
@@ -879,6 +1033,26 @@ var SharedRepo = {
       });
       fg.discrepancies = discRows.map(Mappers.rowToDiscrepancy);
       fg.auditEvents = auditRows;
+      /* Run 5: work-order audit rows join the local WO activity feed so
+         holds, notes, assignments, and completions from other devices
+         appear on job detail after a refresh. */
+      (auditRows || []).filter(function (r) { return r.related_work_order_id; }).forEach(function (r) {
+        var detail = '';
+        var nv = r.new_value;
+        if (typeof nv === 'string') { try { nv = JSON.parse(nv); } catch (e) { nv = null; } }
+        if (r.action === 'WORK_ORDER_NOTE_ADDED' && nv && nv.text) detail = nv.text;
+        else if (r.action === 'JOB_HELD' && nv && nv.reason) detail = 'Job placed ON HOLD: ' + nv.reason;
+        else if (r.action === 'JOB_RESUMED') detail = 'Job resumed from hold.';
+        else if (r.action === 'WAREHOUSE_WORK_STARTED') detail = 'Warehouse work started.';
+        else if (r.action === 'WAREHOUSE_WORK_COMPLETED') detail = 'Warehouse work completed.';
+        else if (r.action === 'EMPLOYEE_ASSIGNED' && nv) detail = 'Employee assigned.';
+        fg.assignmentEvents.push({
+          id: 'AE-' + r.id, at: r.created_at, action: r.action, user: r.user_name || '',
+          warehouse: r.warehouse_id, workOrderId: r.related_work_order_id,
+          lineId: null, rollId: r.related_roll_id || null, assignmentId: null,
+          detail: detail
+        });
+      });
       DB.save();
       Sync.set(isOnline() ? 'SYNCED' : 'OFFLINE');
       return {
@@ -1055,7 +1229,11 @@ var SERVICE_METHODS = [
   'getRoll', 'getRollHistory', 'recordCut',
   'startCountSession', 'recordCycleCount', 'finishCountSession',
   'uploadHistoryCard', 'getDocumentsForRoll', 'downloadHistoryCard', 'confirmHistoryImport',
-  'createDiscrepancy', 'reviewDiscrepancy'
+  'createDiscrepancy', 'reviewDiscrepancy',
+  /* Run 5: scheduled jobs / daily warehouse queue */
+  'getScheduledJobs', 'getJobsForDate', 'getMyScheduledJobs',
+  'setJobHold', 'resumeJob', 'startWarehouseWork', 'assignEmployee',
+  'completeWarehouseWork', 'addWorkOrderNote'
 ];
 var Repository = {
   mode: 'local',

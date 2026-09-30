@@ -35,9 +35,12 @@ insert into public.rolls
 on conflict (id) do nothing;
 
 insert into public.work_orders
-  (id, number, warehouse_id, property, account, status, assignment_status) values
-  ('wo-xs024536', 'XS024536', 'main', 'Ventura Pointe', 'Willowbridge', 'OPEN', 'UNASSIGNED'),
-  ('wo-xs024537', 'XS024537', 'main', 'Harbor Ridge',   'Willowbridge', 'OPEN', 'UNASSIGNED')
+  (id, number, warehouse_id, property, account, status, assignment_status,
+   scheduled_date, scheduled_time, priority) values
+  ('wo-xs024536', 'XS024536', 'main', 'Ventura Pointe', 'Willowbridge', 'OPEN', 'UNASSIGNED',
+   CURRENT_DATE, '09:00', 'HIGH'),
+  ('wo-xs024537', 'XS024537', 'main', 'Harbor Ridge',   'Willowbridge', 'OPEN', 'UNASSIGNED',
+   CURRENT_DATE + 1, '10:30', 'NORMAL')
 on conflict (id) do nothing;
 
 insert into public.work_order_material_lines

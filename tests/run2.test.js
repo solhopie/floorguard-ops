@@ -197,7 +197,7 @@ var over = S.CutService.recordCut({ rollId: 'QH5CPHN', order: 'WO-1002', cutIn: 
 ok(over.ok === false, 'cut larger than the balance is rejected');
 var zero = S.CutService.recordCut({ rollId: 'QH5CPHN', order: 'WO-1002', cutIn: 0, employee: 'Marcus', location: '205B' });
 ok(zero.ok === false, 'zero cut is rejected');
-ok(S.FG().cuts.length === 7, 'rejected cuts leave history untouched (6 seeded + 1)');
+ok(S.FG().cuts.length === 8, 'rejected cuts leave history untouched (7 seeded + 1)');
 
 /* ---------- roll history ledger ---------- */
 var lh = S.ledgerHtml(S.rollByBarcode('QH5CPHN'));
@@ -219,7 +219,7 @@ ok(doc.num === 1, 'first card is HISTORY CARD #1');
 
 /* ---------- Work Orders ---------- */
 freshDB();
-ok(S.FG().workOrders.length === 6, '6 seeded work orders (WO-1001..1004 + XS024536/XS024537)');
+ok(S.FG().workOrders.length === 11, '11 seeded work orders (WO-1001..1004 + XS024536/XS024537 + Run 5 demo jobs XS024541..XS024545)');
 ok(S.woById('WO-1001').number === 'WO-1001', 'woById resolves');
 var w = S.woById('WO-1002');
 ok(!w.assigneeId, 'WO-1002 starts unassigned');
@@ -227,7 +227,7 @@ w.assigneeId = 'e2'; S.DB.save();
 ok(S.woById('WO-1002').assigneeId === 'e2', 'assignment persists');
 var assigned = S.FG().workOrders.filter(function (x) { return !!x.assigneeId; });
 var unassigned = S.FG().workOrders.filter(function (x) { return !x.assigneeId; });
-ok(assigned.length === 5 && unassigned.length === 1, 'ALL / ASSIGNED / UNASSIGNED filter basis');
+ok(assigned.length === 8 && unassigned.length === 3, 'ALL / ASSIGNED / UNASSIGNED filter basis');
 S.woById('WO-1004').opStatus = 'COMPLETE';
 ok(S.woStatusChip(S.woById('WO-1004')).indexOf('st-green') >= 0, 'COMPLETE chip renders green');
 /* navigation */
@@ -275,7 +275,7 @@ S.NAV.forEach(function (g) {
 var old = { schema: 1, currentEmployee: 'Marcus', modules: {} };
 store[S.DB.KEY] = JSON.stringify(old);
 S.DB.load();
-ok(S.DB.data.schema === 3, 'schema 1 migrates to 3');
+ok(S.DB.data.schema === 4, 'schema 1 migrates to 4');
 ok(S.DB.data.currentEmployee === 'Marcus', 'migration preserves the session');
 ok(!!S.FG().rolls && S.FG().rolls.length > 0, 'migration seeds the shared FloorGuard store');
 

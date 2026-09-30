@@ -10,7 +10,7 @@ later without touching UI code.
 FloorGuard Ops (GitHub Pages, static frontend)
         │  PostgREST / Storage REST (anon key, RLS enforced)
         ▼
-Supabase project  ──►  PostgreSQL (migrations/ 0001–0005)
+Supabase project  ──►  PostgreSQL (migrations/ 0001–0006)
                   ──►  Storage bucket `history-cards` (private)
 ```
 
@@ -100,4 +100,8 @@ IDs so re-imports are safe. Nothing uploads without you pressing the button.
   RPC: count record + MB stamp + PHYSICAL_MEASUREMENT history + audit in one
   transaction; does not bump the optimistic roll version (a measurement is
   not a balance change).
+* `migrations/0006_scheduled_jobs.sql` — Run 5: scheduling fields on
+  `work_orders` (priority, scheduled_time, on_hold/hold_reason/hold_at/
+  hold_by, warehouse_completed_at/by). Readiness stays client-derived;
+  work-order audit goes to `audit_events` with entity_type='work_order'.
 * `seed.sql` — demo warehouse, users, locations, rolls, work orders.
