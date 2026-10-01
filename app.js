@@ -6188,7 +6188,7 @@ Screens['return/new'] = function () {
       input.notes = $('#nr-notes').value;
       run6Call(Repository.createReturn(input), function (res) {
         /* Jump straight to receiving so the roll can be scanned. */
-        go('return', res.id);
+        go('return', res.return.id);
       }, function (err) { fail(err && err.message ? err.message : 'Create failed.'); });
     };
   } };
@@ -6530,7 +6530,7 @@ function remnantDlg(it) {
       run6Call(Repository.createReturnedRemnant({
         itemId: it.id, lengthIn: ft * 12 + inch, locationCode: $('#rm-loc').value || null
       }), function (res) {
-        toast('Remnant ' + res.remnantNumber + ' created.');
+        toast('Remnant ' + res.remnant.number + ' created.');
         go('return/item', it.id);
       }, function (e) { toast(e.message || 'Remnant failed.'); });
     }
