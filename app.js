@@ -1351,7 +1351,13 @@ function routeParam(path, name) {
   return '';
 }
 function go(route, param) {
-  window.location.hash = '#/' + route + (param ? '/' + encodeURIComponent(param) : '');
+  var target = '#/' + route + (param ? '/' + encodeURIComponent(param) : '');
+  if (window.location.hash === target) {
+    /* Same hash: hashchange won't fire, so render directly. */
+    render();
+  } else {
+    window.location.hash = target;
+  }
 }
 function resolveRoute(r) {
   if (r === 'signin') return 'signin';
@@ -4483,6 +4489,16 @@ function returnStatusChip(st) {
     READY_FOR_DISPOSITION: 'chip chip-amber', COMPLETED: 'chip chip-green',
     EXCEPTION: 'chip chip-red', CANCELLED: 'chip chip-gray' };
   return '<span class="' + (map[st] || 'chip') + '">' + esc(String(st || '').replace(/_/g, ' ')) + '</span>';
+}
+function returnItemStatusChip(st) {
+  var map = { PENDING: 'chip', INSPECTED: 'chip chip-blue', MEASURED: 'chip chip-blue',
+    DISPOSITION_COMPLETE: 'chip chip-green' };
+  return '<span class="' + (map[st] || 'chip') + '">' + esc(String(st || '').replace(/_/g, ' ')) + '</span>';
+}
+function conditionChip(c) {
+  var map = { GOOD: 'chip chip-green', DAMAGED: 'chip chip-red', WET: 'chip chip-red',
+    CONTAMINATED: 'chip chip-red', UNKNOWN: 'chip chip-amber' };
+  return '<span class="' + (map[c] || 'chip') + '">' + esc(String(c || '')) + '</span>';
 }
 /* Source lineage: RETURN → LOADOUT → WORK ORDER → SALES ORDER → ORIGINAL ORDER. */
 function returnLineage(r) {
