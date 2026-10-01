@@ -44,7 +44,11 @@ function startDouble() {
         { kind: k, prefix: NUMBER_SEED[k][0], next_val: NUMBER_SEED[k][1] });
     });
     var todayD = new Date(), tomD = new Date(todayD.getTime() + 86400000);
-    function dstr(d) { return d.toISOString().slice(0, 10); }
+    /* Warehouse-local calendar date (America/New_York), matching the app's
+       warehouseToday(). toISOString() is UTC and disagrees 8pm–midnight ET. */
+    function dstr(d) {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(d);
+    }
     var rolls = state.tables.rolls;
     rolls.set('16628697', { id: '16628697', barcode: '16628697', style: 'Marvel', color: 'Chrome',
       material_type: 'carpet', width_in: 144, beginning_in: 1034, expected_in: 1034,

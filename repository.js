@@ -1308,8 +1308,12 @@ var SharedRepo = {
      backend. Numbers are backend-issued; the browser never invents one. */
   _refreshRun7: function () {
     var self = this;
-    return self.hydrate().catch(function () { return null; /* offline: use cached */ })
-      .then(function () { return true; });
+    return self.hydrate().catch(function (err) {
+      /* Offline reads fall back to cached data; any other failure (NETWORK,
+         auth, RLS) must surface instead of silently returning stale data. */
+      if (err && err.code === 'OFFLINE') return null;
+      throw err;
+    }).then(function () { return true; });
   },
   issueBusinessNumber: function (kind, requestKey) {
     /* Run 7: direct counter access is revoked in the backend — every document
@@ -1366,6 +1370,7 @@ var SharedRepo = {
           var lo = loadoutById(res.loadout_id);
           logOrderEvent('LOADOUT_STARTED', { loadoutId: res.loadout_id,
             loadoutNumber: lo && lo.number, workOrderId: woId,
+            salesOrderId: lo && lo.salesOrderId,
             detail: 'Loadout ' + (lo && lo.number) + ' started by ' + DB.data.currentEmployee + '.' });
           return { ok: true, loadout: lo, duplicate: !!res.duplicate };
         });
@@ -1380,7 +1385,12 @@ var SharedRepo = {
       .then(self._rpcResult)
       .then(function (res) {
         return self._refreshRun7().then(function () {
-          return { ok: true, loadout: loadoutById(loId), duplicate: !!res.duplicate };
+          var lo = loadoutById(loId);
+          if (!res.duplicate)
+            logOrderEvent('LOADOUT_LOADING_BEGUN', { loadoutId: loId,
+              loadoutNumber: lo && lo.number, workOrderId: lo && lo.workOrderId,
+              salesOrderId: lo && lo.salesOrderId, detail: 'Employee is actively loading.' });
+          return { ok: true, loadout: lo, duplicate: !!res.duplicate };
         });
       });
   },
@@ -1395,10 +1405,25 @@ var SharedRepo = {
       .then(self._rpcResult)
       .then(function (res) {
         if (res.wrong_material)
-          throw RepoError('WRONG MATERIAL', 'Wrong material scanned — flagged as an exception.');
+          return self._refreshRun7().then(function () {
+            var lo = loadoutById(loId);
+            var line = lo && loadoutLineById(lo, lineId);
+            logOrderEvent('LOADOUT_EXCEPTION', { loadoutId: loId,
+              loadoutNumber: lo && lo.number, workOrderId: lo && lo.workOrderId,
+              salesOrderId: lo && lo.salesOrderId,
+              detail: 'Line ' + (line && line.seq) + ': WRONG MATERIAL — scanned ' +
+                normalizeBarcode(String(code || '')) + ', expected ' + (line && line.barcode || '—') + '.' });
+            throw RepoError('WRONG MATERIAL', 'Wrong material scanned — flagged as an exception.');
+          });
         return self._refreshRun7().then(function () {
           var lo = loadoutById(loId);
-          return { ok: true, line: lo && loadoutLineById(lo, lineId), duplicate: !!res.duplicate };
+          var line = lo && loadoutLineById(lo, lineId);
+          if (!res.duplicate)
+            logOrderEvent('MATERIAL_VERIFIED', { loadoutId: loId,
+              loadoutNumber: lo && lo.number, workOrderId: lo && lo.workOrderId,
+              salesOrderId: lo && lo.salesOrderId,
+              detail: 'Line ' + (line && line.seq) + ': roll ' + (line && line.barcode) + ' verified.' });
+          return { ok: true, line: line, duplicate: !!res.duplicate };
         });
       });
   },
@@ -1413,7 +1438,13 @@ var SharedRepo = {
       .then(function (res) {
         return self._refreshRun7().then(function () {
           var lo = loadoutById(loId);
-          return { ok: true, line: lo && loadoutLineById(lo, lineId), duplicate: !!res.duplicate };
+          var line = lo && loadoutLineById(lo, lineId);
+          if (!res.duplicate)
+            logOrderEvent('MATERIAL_LOADED', { loadoutId: loId,
+              loadoutNumber: lo && lo.number, workOrderId: lo && lo.workOrderId,
+              salesOrderId: lo && lo.salesOrderId,
+              detail: 'Line ' + (line && line.seq) + ' loaded by ' + DB.data.currentEmployee + '.' });
+          return { ok: true, line: line, duplicate: !!res.duplicate };
         });
       });
   },
@@ -1428,7 +1459,12 @@ var SharedRepo = {
       .then(self._rpcResult)
       .then(function () {
         return self._refreshRun7().then(function () {
-          return { ok: true, loadout: loadoutById(loId) };
+          var lo = loadoutById(loId);
+          logOrderEvent('LOADOUT_EXCEPTION', { loadoutId: loId,
+            loadoutNumber: lo && lo.number, workOrderId: lo && lo.workOrderId,
+            salesOrderId: lo && lo.salesOrderId,
+            detail: type + (notes ? ' — ' + notes : '') + ' flagged by ' + DB.data.currentEmployee + '.' });
+          return { ok: true, loadout: lo };
         });
       });
   },
@@ -1444,6 +1480,7 @@ var SharedRepo = {
           if (!res.duplicate)
             logOrderEvent('LOADOUT_COMPLETED', { loadoutId: loId,
               loadoutNumber: lo && lo.number, workOrderId: lo && lo.workOrderId,
+              salesOrderId: lo && lo.salesOrderId,
               detail: 'Loadout ' + (lo && lo.number) + ' completed.' });
           return { ok: true, loadout: lo, duplicate: !!res.duplicate };
         });
