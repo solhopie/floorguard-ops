@@ -460,6 +460,71 @@ var Mappers = {
       lines: lines, exceptions: exs
     };
   },
+  /* ---- Run 8: returns ---- */
+  rowToReturnItem: function (i) {
+    return {
+      id: i.id, returnId: i.return_id, warehouse: i.warehouse_id,
+      materialType: (i.material_type || '').toUpperCase(), productId: i.product_id || null,
+      rollId: i.roll_id || null, sourceAssignmentId: i.source_inventory_assignment_id || null,
+      sourceLoadoutLineId: i.source_loadout_line_id || null,
+      style: i.style || null, color: i.color || null, widthIn: i.width_in,
+      uom: i.uom || 'IN', returnedQuantity: i.returned_quantity,
+      measuredIn: i.measured_in, measuredBy: i.measured_by || null, measuredAt: i.measured_at || null,
+      condition: i.condition || null, disposition: i.disposition || null,
+      status: i.status || 'PENDING', locationCode: i.location_code || null,
+      notes: i.notes || null, createdAt: i.created_at, updatedAt: i.updated_at,
+      requestKey: i.client_request_key || null
+    };
+  },
+  rowToReturn: function (r, itemRows, exRows) {
+    var items = (itemRows || []).filter(function (i) { return i.return_id === r.id; })
+      .map(Mappers.rowToReturnItem);
+    var exs = (exRows || []).filter(function (e) { return e.return_id === r.id; })
+      .map(Mappers.rowToReturnException);
+    return {
+      id: r.id, number: r.return_number, warehouse: r.warehouse_id,
+      workOrderId: r.work_order_id || null, salesOrderId: r.sales_order_id || null,
+      loadoutId: r.loadout_id || null, property: r.property || null, account: r.account || null,
+      sourceKind: r.source_kind || 'MANUAL', reason: r.reason || 'OTHER',
+      status: r.status || 'PENDING', notes: r.notes || null,
+      createdBy: r.created_by || '', receivedBy: r.received_by || null,
+      createdAt: r.created_at, receivedAt: r.received_at || null,
+      completedAt: r.completed_at || null, updatedAt: r.updated_at,
+      requestKey: r.client_request_key || null,
+      items: items, exceptions: exs
+    };
+  },
+  rowToReturnDisposition: function (d) {
+    return {
+      id: d.id, returnId: d.return_id, returnItemId: d.return_item_id,
+      disposition: d.disposition, decidedBy: d.decided_by || '', approvedBy: d.approved_by || null,
+      reason: d.reason || null, locationCode: d.location_code || null,
+      previousBalanceIn: d.previous_balance_in, quantityIn: d.quantity_in,
+      newBalanceIn: d.new_balance_in, vendorSupplier: d.vendor_supplier || null,
+      vendorReference: d.vendor_reference || null, vendorStatus: d.vendor_status || null,
+      at: d.created_at, requestKey: d.client_request_key || null
+    };
+  },
+  rowToReturnedRemnant: function (m) {
+    return {
+      id: m.id, number: m.remnant_number, parentRollId: m.parent_roll_id || null,
+      returnId: m.return_id, returnItemId: m.return_item_id || null,
+      materialType: (m.material_type || '').toUpperCase(), style: m.style || null,
+      color: m.color || null, widthIn: m.width_in, lengthIn: m.length_in,
+      condition: m.condition || null, locationCode: m.location_code || null,
+      status: m.status || 'AVAILABLE', createdBy: m.created_by || '',
+      createdAt: m.created_at, updatedAt: m.updated_at,
+      requestKey: m.client_request_key || null
+    };
+  },
+  rowToReturnException: function (e) {
+    return {
+      id: e.id, returnId: e.return_id, returnItemId: e.return_item_id || null,
+      kind: e.kind, detail: e.detail || null, status: e.status || 'OPEN',
+      raisedBy: e.raised_by || '', resolvedBy: e.resolved_by || null,
+      resolvedAt: e.resolved_at || null, createdAt: e.created_at
+    };
+  },
   /* ---- inventory assignments ---- */
   rowToAssignment: function (r) {
     return {
@@ -533,9 +598,11 @@ var Mappers = {
   },
   /* ---- documents (history cards) ---- */
   rowToDocument: function (r) {
+    var isReturn = !!r.return_id;
     return {
       id: r.id, rollId: r.roll_id || null, receiptId: r.receipt_id || null,
-      kind: r.receipt_id ? 'RECEIPT_DOCUMENT' : 'HISTORY_CARD',
+      returnId: r.return_id || null,
+      kind: isReturn ? 'RETURN_DOCUMENT' : (r.receipt_id ? 'RECEIPT_DOCUMENT' : 'HISTORY_CARD'),
       docType: r.document_type || 'HISTORY CARD',
       employee: r.employee_name || '', at: r.captured_at,
       location: r.location_code || null, sessionId: r.session_id || null,
@@ -614,6 +681,59 @@ var LocalRepo = {
   markLoadoutLineLoaded: function (loId, lineId) { return Promise.resolve(markLoadoutLineLoadedLocal(loId, lineId)); },
   createLoadoutException: function (loId, lineId, type, notes) { return Promise.resolve(createLoadoutExceptionLocal(loId, lineId, type, notes)); },
   completeLoadout: function (loId) { return Promise.resolve(completeLoadoutLocal(loId)); },
+
+  /* ================= Run 8: Returns + Returned Material Disposition ============ */
+  getReturns: function () { return Promise.resolve((FG().returns || []).slice()); },
+  getReturn: function (id) { return Promise.resolve(returnById(id)); },
+  getReturnItems: function (returnId) { return Promise.resolve(returnItemsFor(returnId)); },
+  getReturnItem: function (id) { return Promise.resolve(returnItemById(id)); },
+  getReturnDispositions: function (itemId) { return Promise.resolve(returnDispositionsFor(itemId)); },
+  getReturnedRemnants: function (returnId) { return Promise.resolve(remnantsForReturn(returnId)); },
+  getAvailableRemnants: function () { return Promise.resolve(availableRemnants()); },
+  getReturnExceptions: function (returnId) { return Promise.resolve(returnExceptionsFor(returnId)); },
+  createReturn: function (o) { return Promise.resolve(createReturnLocal(o)); },
+  receiveReturn: function (id) { return Promise.resolve(receiveReturnLocal(id)); },
+  addReturnItem: function (returnId, it) { return Promise.resolve(addReturnItemLocal(returnId, it)); },
+  measureReturnItem: function (itemId, inches) { return Promise.resolve(measureReturnItemLocal(itemId, inches)); },
+  inspectReturnItem: function (itemId, condition, notes) { return Promise.resolve(inspectReturnItemLocal(itemId, condition, notes)); },
+  submitReturn: function (id) { return Promise.resolve(submitReturnLocal(id)); },
+  approveRestock: function (itemId, o) { return Promise.resolve(approveRestockLocal(itemId, o)); },
+  createReturnedRemnant: function (itemId, o) { return Promise.resolve(createReturnedRemnantLocal(itemId, o)); },
+  quarantineReturnItem: function (itemId, o) { return Promise.resolve(quarantineReturnItemLocal(itemId, o)); },
+  scrapReturnItem: function (itemId, o) { return Promise.resolve(scrapReturnItemLocal(itemId, o)); },
+  sendReturnToVendor: function (itemId, o) { return Promise.resolve(sendReturnToVendorLocal(itemId, o)); },
+  holdReturnItem: function (itemId, reason) { return Promise.resolve(holdReturnItemLocal(itemId, reason)); },
+  completeReturn: function (id) { return Promise.resolve(completeReturnLocal(id)); },
+  cancelReturn: function (id, reason) { return Promise.resolve(cancelReturnLocal(id, reason)); },
+  raiseReturnException: function (returnId, o) { return Promise.resolve(raiseReturnExceptionLocal(returnId, o)); },
+  resolveReturnException: function (exceptionId, resolution) { return Promise.resolve(resolveReturnExceptionLocal(exceptionId, resolution)); },
+  uploadReturnDocument: function (o) {
+    /* o: {returnId, docType, imageDataUrl, thumbDataUrl, mimeType, employee} */
+    var now = new Date();
+    var r = returnById(o.returnId);
+    var rec = {
+      id: rid('D'), rollId: null, barcode: null, raw: null, discovered: false,
+      kind: 'RETURN_DOCUMENT', docType: o.docType || 'RETURN CONDITION PHOTO',
+      image: o.imageDataUrl || null, thumb: o.thumbDataUrl || o.imageDataUrl || null,
+      employee: o.employee || DB.data.currentEmployee,
+      at: now.toISOString(), date: now.toLocaleDateString(), time: fmtTime(now.toISOString()),
+      location: null, source: 'LOCAL',
+      num: returnDocuments(o.returnId).length + 1,
+      imports: [], returnId: o.returnId, sessionId: null
+    };
+    FG().documents.push(rec);
+    DB.save();
+    logReturnEvent('DOCUMENT_CAPTURED', { returnId: o.returnId, returnNumber: r && r.number,
+      workOrderId: r && r.workOrderId, salesOrderId: r && r.salesOrderId,
+      detail: rec.docType + ' captured by ' + rec.employee + '.' });
+    return Promise.resolve({ ok: true, doc: rec });
+  },
+  getDocumentsForReturn: function (returnId) {
+    return Promise.resolve(returnDocuments(returnId));
+  },
+  /* local remnant reads feed Assign Inventory */
+  getRemnantById: function (id) { return Promise.resolve(remnantById(id)); },
+  /* ================= end Run 8 (local) ============ */
   getReceipts: function () { return Promise.resolve(getReceiptsLocal()); },
   getReceipt: function (id) { return Promise.resolve(receiptById(id)); },
   createReceipt: function (o) { return Promise.resolve(createReceiptLocal(o)); },
@@ -1596,6 +1716,365 @@ var SharedRepo = {
       });
   },
 
+  /* ================= Run 8: Returns + Returned Material Disposition (shared) ==
+     All balance changes go through the atomic RPCs (return_restock,
+     create_returned_remnant, …) — never direct table writes. The UI never
+     calls Supabase directly; these methods are the only shared path. */
+  _refreshReturns: function () {
+    var self = this;
+    return self.hydrate().catch(function (err) {
+      if (err && err.code === 'OFFLINE') return null;
+      throw err;
+    }).then(function () { return true; });
+  },
+  getReturns: function () {
+    var self = this;
+    return self._refreshReturns().then(function () { return (FG().returns || []).slice(); });
+  },
+  getReturn: function (id) {
+    var self = this;
+    return self._refreshReturns().then(function () { return returnById(id); });
+  },
+  getReturnItems: function (returnId) {
+    var self = this;
+    return self._refreshReturns().then(function () { return returnItemsFor(returnId); });
+  },
+  getReturnItem: function (id) {
+    var self = this;
+    return self._refreshReturns().then(function () { return returnItemById(id); });
+  },
+  getReturnDispositions: function (itemId) {
+    var self = this;
+    return self._refreshReturns().then(function () { return returnDispositionsFor(itemId); });
+  },
+  getReturnedRemnants: function (returnId) {
+    var self = this;
+    return self._refreshReturns().then(function () { return remnantsForReturn(returnId); });
+  },
+  getAvailableRemnants: function () {
+    var self = this;
+    return self._refreshReturns().then(function () { return availableRemnants(); });
+  },
+  getReturnExceptions: function (returnId) {
+    var self = this;
+    return self._refreshReturns().then(function () { return returnExceptionsFor(returnId); });
+  },
+  getRemnantById: function (id) {
+    var self = this;
+    return self._refreshReturns().then(function () { return remnantById(id); });
+  },
+  createReturn: function (o) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT CREATED');
+    self._requireOrderPolicy(returnPolicy().canCreateReturn, 'Not authorized to create returns.');
+    o = o || {};
+    var id = o.id || rid('RT');
+    var reqKey = o.requestKey || rid('K');
+    return self._rpc('create_return', {
+        p_id: id, p_warehouse_id: self.wh(),
+        p_work_order_id: o.workOrderId || null, p_sales_order_id: o.salesOrderId || null,
+        p_loadout_id: o.loadoutId || null, p_property: o.property || null,
+        p_account: o.account || null, p_source_kind: o.sourceKind || 'MANUAL',
+        p_reason: o.reason || 'OTHER', p_notes: o.notes || null,
+        p_employee: DB.data.currentEmployee, p_request_key: reqKey
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        /* On a duplicate retry the server returns the ORIGINAL id — use it,
+           not the freshly generated local id. */
+        var rid2 = (res && res.return_id) || id;
+        return self._refreshReturns().then(function () {
+          return { ok: true, return: returnById(rid2), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  receiveReturn: function (id) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT RECEIVED');
+    self._requireOrderPolicy(returnPolicy().canReceiveReturn, 'Not authorized to receive returns.');
+    return self._rpc('receive_return', {
+        p_return_id: id, p_employee: DB.data.currentEmployee, p_request_key: rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, return: returnById(id), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  submitReturn: function (id) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT SUBMITTED');
+    self._requireOrderPolicy(returnPolicy().canCreateReturn, 'Not authorized to submit returns.');
+    return self._rpc('submit_return', {
+        p_return_id: id, p_employee: DB.data.currentEmployee, p_request_key: rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, return: returnById(id), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  addReturnItem: function (returnId, it) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN ITEM NOT ADDED');
+    self._requireOrderPolicy(returnPolicy().canCreateReturn, 'Not authorized to create returns.');
+    it = it || {};
+    var id = it.id || rid('RI');
+    var reqKey = it.requestKey || rid('K');
+    return self._rpc('add_return_item', {
+        p_id: id, p_return_id: returnId, p_warehouse_id: self.wh(),
+        p_material_type: it.materialType || 'CARPET', p_product_id: it.productId || null,
+        p_roll_id: it.rollId || null,
+        p_source_inventory_assignment_id: it.sourceAssignmentId || null,
+        p_source_loadout_line_id: it.sourceLoadoutLineId || null,
+        p_style: it.style || null, p_color: it.color || null,
+        p_width_in: it.widthIn != null ? it.widthIn : null, p_uom: it.uom || 'IN',
+        p_returned_quantity: it.returnedQuantity != null ? it.returnedQuantity : null,
+        p_location_code: it.locationCode || null, p_notes: it.notes || null,
+        p_employee: DB.data.currentEmployee, p_request_key: reqKey
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, item: returnItemById(id), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  measureReturnItem: function (itemId, inches) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT MEASURED');
+    self._requireOrderPolicy(returnPolicy().canMeasureReturn, 'Not authorized to measure returns.');
+    return self._rpc('measure_return_item', {
+        p_item_id: itemId, p_measured_in: inches,
+        p_employee: DB.data.currentEmployee, p_request_key: rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, item: returnItemById(itemId), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  inspectReturnItem: function (itemId, condition, notes) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT INSPECTED');
+    self._requireOrderPolicy(returnPolicy().canInspectReturn, 'Not authorized to inspect returns.');
+    return self._rpc('inspect_return_item', {
+        p_item_id: itemId, p_condition: condition,
+        p_employee: DB.data.currentEmployee, p_notes: notes || null, p_request_key: rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, item: returnItemById(itemId), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  approveRestock: function (itemId, o) {
+    /* THE atomic balance change. Optimistic version guard: on a stale
+       version the RPC raises ROLL_VERSION_CONFLICT and nothing is written. */
+    var self = this;
+    self._requireOnline('OFFLINE — RESTOCK NOT SYNCED');
+    self._requireOrderPolicy(returnPolicy().canApproveRestock, 'Restock approval requires a supervisor or above.');
+    o = o || {};
+    return self._rpc('return_restock', {
+        p_item_id: itemId, p_roll_id: o.rollId, p_roll_version: o.rollVersion,
+        p_location_code: o.locationCode || null, p_employee: DB.data.currentEmployee,
+        p_approver: o.approver || DB.data.currentEmployee, p_request_key: o.requestKey || rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, duplicate: !!res.duplicate,
+            previousBalanceIn: res.previous_balance_in, quantityIn: res.quantity_in,
+            newBalanceIn: res.new_balance_in, newVersion: res.new_version };
+        });
+      });
+  },
+  createReturnedRemnant: function (itemId, o) {
+    var self = this;
+    self._requireOnline('OFFLINE — REMNANT NOT CREATED');
+    self._requireOrderPolicy(returnPolicy().canCreateRemnant, 'Remnant creation requires a supervisor or above.');
+    o = o || {};
+    return self._rpc('create_returned_remnant', {
+        p_item_id: itemId, p_length_in: o.lengthIn,
+        p_location_code: o.locationCode || null, p_employee: DB.data.currentEmployee,
+        p_request_key: o.requestKey || rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, duplicate: !!res.duplicate, remnant: remnantById(res.remnant_id) };
+        });
+      });
+  },
+  quarantineReturnItem: function (itemId, o) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT QUARANTINED');
+    self._requireOrderPolicy(returnPolicy().canQuarantine, 'Quarantine requires a supervisor or above.');
+    o = o || {};
+    return self._rpc('quarantine_return_item', {
+        p_item_id: itemId, p_reason: o.reason || '',
+        p_location_code: o.locationCode || null, p_employee: DB.data.currentEmployee,
+        p_request_key: o.requestKey || rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, duplicate: !!res.duplicate };
+        });
+      });
+  },
+  scrapReturnItem: function (itemId, o) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT SCRAPPED');
+    self._requireOrderPolicy(returnPolicy().canScrap, 'Scrap authorization requires a manager or admin.');
+    o = o || {};
+    return self._rpc('scrap_return_item', {
+        p_item_id: itemId, p_reason: o.reason || '',
+        p_employee: DB.data.currentEmployee, p_request_key: o.requestKey || rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, duplicate: !!res.duplicate };
+        });
+      });
+  },
+  sendReturnToVendor: function (itemId, o) {
+    var self = this;
+    self._requireOnline('OFFLINE — VENDOR RETURN NOT RECORDED');
+    self._requireOrderPolicy(returnPolicy().canVendorReturn, 'Vendor returns require a manager or admin.');
+    o = o || {};
+    return self._rpc('send_return_to_vendor', {
+        p_item_id: itemId, p_supplier: o.supplier || '', p_reference: o.reference || null,
+        p_employee: DB.data.currentEmployee, p_request_key: o.requestKey || rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, duplicate: !!res.duplicate, vendorStatus: res.vendor_status };
+        });
+      });
+  },
+  holdReturnItem: function (itemId, reason) {
+    var self = this;
+    self._requireOnline('OFFLINE — HOLD NOT RECORDED');
+    self._requireOrderPolicy(returnPolicy().canQuarantine, 'Hold for review requires a supervisor or above.');
+    return self._rpc('hold_return_item', {
+        p_item_id: itemId, p_reason: reason || null,
+        p_employee: DB.data.currentEmployee, p_request_key: rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, duplicate: !!res.duplicate };
+        });
+      });
+  },
+  completeReturn: function (id) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT COMPLETED');
+    self._requireOrderPolicy(returnPolicy().canApproveRestock, 'Completing a return requires a supervisor or above.');
+    return self._rpc('complete_return', {
+        p_return_id: id, p_employee: DB.data.currentEmployee, p_request_key: rid('K')
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, return: returnById(id), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  cancelReturn: function (id, reason) {
+    var self = this;
+    self._requireOnline('OFFLINE — RETURN NOT CANCELLED');
+    self._requireOrderPolicy(returnPolicy().canCancelReturn, 'Cancelling a return requires a manager or admin.');
+    return self._rpc('cancel_return', {
+        p_return_id: id, p_reason: reason || null, p_employee: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, return: returnById(id), duplicate: !!res.duplicate };
+        });
+      });
+  },
+  raiseReturnException: function (returnId, o) {
+    var self = this;
+    self._requireOnline('OFFLINE — EXCEPTION NOT RAISED');
+    self._requireOrderPolicy(returnPolicy().canCreateReturn, 'Not authorized to raise return exceptions.');
+    o = o || {};
+    return self._rpc('raise_return_exception', {
+        p_return_id: returnId, p_kind: o.kind || 'OTHER', p_detail: o.detail || null,
+        p_item_id: o.itemId || null, p_employee: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () {
+          return { ok: true, exception: (returnExceptionsFor(returnId) || [])
+            .filter(function (e) { return e.id === res.exception_id; })[0] || null };
+        });
+      });
+  },
+  resolveReturnException: function (exceptionId, resolution) {
+    var self = this;
+    self._requireOnline('OFFLINE — EXCEPTION NOT RESOLVED');
+    self._requireOrderPolicy(returnPolicy().canResolveReturnExceptions, 'Resolving exceptions requires a supervisor or above.');
+    return self._rpc('resolve_return_exception', {
+        p_exception_id: exceptionId, p_resolution: resolution || null,
+        p_employee: DB.data.currentEmployee
+      })
+      .then(self._rpcResult)
+      .then(function (res) {
+        return self._refreshReturns().then(function () { return { ok: true, duplicate: !!res.duplicate }; });
+      });
+  },
+  uploadReturnDocument: function (o) {
+    /* o: {returnId, docType, imageDataUrl, mimeType, employee} — backend-authoritative:
+       image bytes go to private storage, the metadata row links return_id. */
+    var self = this;
+    self._requireOnline('OFFLINE — DOCUMENT NOT SAVED');
+    self._requireOrderPolicy(returnPolicy().canReceiveReturn, 'Not authorized to handle returns.');
+    var bytes = dataUrlToBytes(o.imageDataUrl);
+    if (!bytes) return Promise.reject(RepoError('INVALID_INPUT', 'No image data.'));
+    if (!o.returnId) return Promise.reject(RepoError('INVALID_INPUT', 'RETURN REQUIRED'));
+    var wh = self.wh();
+    var path = wh + '/returns/' + o.returnId + '/' + rid('RD') + '.jpg';
+    return pgFetch('/storage/v1/object/history-cards/' + path, {
+      method: 'POST', body: bytes, contentType: o.mimeType || 'image/jpeg'
+    }).then(function () {
+      var row = {
+        id: rid('D'), roll_id: null, receipt_id: null, return_id: o.returnId,
+        warehouse_id: wh, storage_path: path,
+        document_type: o.docType || 'RETURN_CONDITION',
+        employee_name: o.employee || DB.data.currentEmployee || null,
+        captured_at: isoNow(), mime_type: o.mimeType || 'image/jpeg',
+        byte_size: bytes.length
+      };
+      return self._post('documents', [row]).then(function () {
+        return { row: row, path: path };
+      });
+    }).then(function (up) {
+      return self._refreshReturns().then(function () { return up; });
+    }).then(function (up) {
+      var doc = Mappers.rowToDocument({
+        id: up.row.id, roll_id: null, receipt_id: null, return_id: o.returnId,
+        document_type: o.docType || 'RETURN_CONDITION', employee_name: o.employee || null,
+        captured_at: isoNow(), storage_path: up.path });
+      doc.image = o.imageDataUrl || null;
+      logOrderEvent('DOCUMENT_CAPTURED', { returnId: o.returnId, detail: doc.docType + ' captured.' });
+      return { ok: true, doc: doc };
+    });
+  },
+  getDocumentsForReturn: function (returnId) {
+    var self = this;
+    return self._refreshReturns().then(function () { return returnDocuments(returnId); });
+  },
+  /* ================= end Run 8 (shared) ============ */
+
   holdSalesOrder: function (soId, reason) {
     var self = this;
     self._requireOnline('OFFLINE — SALES ORDER NOT HELD');
@@ -1944,7 +2423,12 @@ var SharedRepo = {
       get('loadouts'), self._get('loadout_lines', { select: '*' }),
       self._get('loadout_exceptions', { select: '*' }),
       get('receipts'), self._get('receipt_lines', { select: '*' }),
-      self._get('receipt_exceptions', { select: '*' })
+      self._get('receipt_exceptions', { select: '*' }),
+      /* Run 8: returns + returned material disposition. */
+      get('returns'), self._get('return_items', { select: '*' }),
+      self._get('return_dispositions', { select: '*' }),
+      get('returned_remnants'),
+      self._get('return_exceptions', { select: '*' })
     ]).then(function (p) {
       var warehouses = p[0], users = p[1], rollRows = p[2], woRows = p[3],
           lineRows = p[4], asnRows = p[5], cutRows = p[6], sessRows = p[7],
@@ -1953,7 +2437,9 @@ var SharedRepo = {
           orderRows = p[14], orderItemRows = p[15],
           soRows = p[16], soLineRows = p[17],
           loRows = p[18], loLineRows = p[19], loExRows = p[20],
-          rcRows = p[21], rcLineRows = p[22], rcExRows = p[23];
+          rcRows = p[21], rcLineRows = p[22], rcExRows = p[23],
+          retRows = p[24], retItemRows = p[25], retDispRows = p[26],
+          remRows = p[27], retExRows = p[28];
       var fg = FG();
       /* warehouses + employees */
       var roleMap = { WAREHOUSE_EMPLOYEE: 'WORKER', SUPERVISOR: 'SUPERVISOR', MANAGER: 'MANAGER', ADMIN: 'ADMIN' };
@@ -2028,6 +2514,28 @@ var SharedRepo = {
       /* Run 7: loadout + receipts join the local mirror. */
       fg.loadouts = (loRows || []).map(function (r) { return Mappers.rowToLoadout(r, loLineRows, loExRows); });
       fg.receipts = (rcRows || []).map(function (r) { return Mappers.rowToReceipt(r, rcLineRows, rcExRows); });
+      /* Run 8: returns + returned material disposition join the local mirror. */
+      fg.returns = (retRows || []).map(function (r) { return Mappers.rowToReturn(r, retItemRows, retExRows); });
+      fg.returnItems = (retItemRows || []).map(Mappers.rowToReturnItem);
+      fg.returnDispositions = (retDispRows || []).map(Mappers.rowToReturnDisposition);
+      fg.returnedRemnants = (remRows || []).map(Mappers.rowToReturnedRemnant);
+      fg.returnExceptions = (retExRows || []).map(Mappers.rowToReturnException);
+      /* Run 8: return audit rows join the local return-activity feed so
+         returns from other devices appear after a refresh.
+         Idempotent: skip audit rows already reflected (by audit id). */
+      (auditRows || []).filter(function (r) { return r.entity_type === 'return'; }).forEach(function (r) {
+        var already = (FG().orderEvents || []).some(function (e) {
+          return e.auditId === r.id;
+        });
+        if (already) return;
+        var detail = '';
+        var nv = r.new_value;
+        if (typeof nv === 'string') { try { nv = JSON.parse(nv); } catch (e) { nv = null; } }
+        if (nv && nv.detail) detail = nv.detail;
+        logReturnEvent(r.action, { returnId: r.entity_id, detail: detail,
+          user: r.user_name, auditId: r.id, at: r.created_at });
+      });
+      migrateFloorguardV6toV7(); /* ensure return collections exist on the mirror */
       /* Run 7: receipt audit rows join the local receipt-activity feed so
          receiving from other devices appears after a refresh. */
       fg.receiptEvents = (auditRows || []).filter(function (r) { return r.entity_type === 'receipt'; })
@@ -2254,7 +2762,16 @@ var SERVICE_METHODS = [
   'verifyLoadoutLine', 'markLoadoutLineLoaded', 'createLoadoutException', 'completeLoadout',
   'getReceipts', 'getReceipt', 'createReceipt', 'addReceiptLine',
   'receiveRoll', 'createReceiptException', 'completeReceipt',
-  'uploadReceiptDocument', 'getDocumentsForReceipt'
+  'uploadReceiptDocument', 'getDocumentsForReceipt',
+  /* Run 8: returns + returned material disposition */
+  'getReturns', 'getReturn', 'getReturnItems', 'getReturnItem',
+  'getReturnDispositions', 'getReturnedRemnants', 'getAvailableRemnants',
+  'getReturnExceptions', 'getRemnantById',
+  'createReturn', 'receiveReturn', 'addReturnItem', 'measureReturnItem',
+  'inspectReturnItem', 'submitReturn', 'approveRestock', 'createReturnedRemnant',
+  'quarantineReturnItem', 'scrapReturnItem', 'sendReturnToVendor', 'holdReturnItem',
+  'completeReturn', 'cancelReturn', 'raiseReturnException', 'resolveReturnException',
+  'uploadReturnDocument', 'getDocumentsForReturn'
 ];
 var Repository = {
   mode: 'local',

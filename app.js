@@ -25,7 +25,7 @@ function daypart() {
   return 'evening';
 }
 
-var APP_VERSION = '0.7.0';
+var APP_VERSION = '0.8.0';
 
 /* ---------------- data layer ----------------
    One localStorage key, schema version, per-module namespaces.
@@ -37,7 +37,7 @@ var DB = {
   data: null,
   seed: function () {
     return {
-      schema: 6,
+      schema: 7,
       currentEmployee: null,
       employees: ['Marcus', 'Dana', 'Luis'],
       employeeRoles: { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' },
@@ -55,55 +55,63 @@ var DB = {
       var raw = localStorage.getItem(this.KEY);
       if (raw) {
         var d = JSON.parse(raw);
-        if (d && d.schema === 6) { this.data = d; ensureFloorguardStore(); return; }
+        if (d && d.schema === 6) {
+          /* v6 -> v7: Run 8. Return collections. No existing data is touched. */
+          d.schema = 7;
+          this.data = d;
+          migrateFloorguardV6toV7();
+          this.save();
+          return;
+        }
         if (d && d.schema === 5) {
-          /* v5 -> v6: Run 7. Loadout + receipt collections, central document
-             numbering counters. No existing data is touched. */
-          d.schema = 6;
+          /* v5 -> v6 -> v7: Run 7 loadout/receipt, then Run 8 returns. */
+          d.schema = 7;
           this.data = d;
           migrateFloorguardV5toV6();
+          migrateFloorguardV6toV7();
           this.save();
           return;
         }
         if (d && d.schema === 4) {
-          /* v4 -> v5 -> v6: Run 6 order collections + timezone, then Run 7. */
+          /* v4 -> v5 -> v6 -> v7: Run 6 orders, Run 7 loadout/receipt, Run 8 returns. */
           (d.warehouses || []).forEach(function (w) { if (!w.timezone) w.timezone = 'America/New_York'; });
-          d.schema = 6;
+          d.schema = 7;
           this.data = d;
           migrateFloorguardV3toV4();
           migrateFloorguardV4toV5();
           migrateFloorguardV5toV6();
+          migrateFloorguardV6toV7();
           this.save();
           return;
         }
         if (d && d.schema === 3) {
-          /* v3 -> v4 -> v5: Run 5 scheduled-job fields, then Run 6 order
-             collections + explicit warehouse timezone. */
+          /* v3 -> ... -> v7 */
           (d.warehouses || []).forEach(function (w) { if (!w.timezone) w.timezone = 'America/New_York'; });
-          d.schema = 6;
+          d.schema = 7;
           this.data = d;
           migrateFloorguardV3toV4();
           migrateFloorguardV4toV5();
           migrateFloorguardV5toV6();
+          migrateFloorguardV6toV7();
           this.save();
           return;
         }
         if (d && d.schema === 2) {
-          /* v2 -> v3 -> ... -> v6 */
+          /* v2 -> v3 -> ... -> v7 */
           d.schema = 3;
           this.data = d;
           migrateFloorguardV2toV3();
           migrateFloorguardV3toV4();
           migrateFloorguardV4toV5();
           migrateFloorguardV5toV6();
-          d.schema = 6;
+          migrateFloorguardV6toV7();
+          d.schema = 7;
           this.save();
           return;
         }
         if (d && d.schema === 1) {
-          /* v1 -> v2: add warehouse context + roles, seed the shared
-             FloorGuard inventory store. Run 1 session data is kept. */
-          d.schema = 6;
+          /* v1 -> v2 -> ... -> v7 */
+          d.schema = 7;
           if (!d.warehouses) d.warehouses = [{ id: 'main', name: 'Main Warehouse', timezone: 'America/New_York' }];
           if (!d.currentWarehouse) d.currentWarehouse = 'main';
           if (!d.employeeRoles) d.employeeRoles = { Marcus: 'MANAGER', Dana: 'WORKER', Luis: 'WORKER' };
@@ -112,6 +120,7 @@ var DB = {
           migrateFloorguardV3toV4();
           migrateFloorguardV4toV5();
           migrateFloorguardV5toV6();
+          migrateFloorguardV6toV7();
           this.save();
           return;
         }
@@ -421,6 +430,7 @@ function ensureFloorguardStore() {
   }
   migrateFloorguardV4toV5();
   migrateFloorguardV5toV6();
+  migrateFloorguardV6toV7(); /* Run 8: returns collections, additive */
 }
 
 /* Run 6 (schema 5): order / sales-order collections on existing stores.
@@ -1545,6 +1555,19 @@ Screens.dashboard = function () {
       '<span class="qnum">' + receiptsToday().length + '</span><span class="qlabel">Receipts Today</span></button>' +
     '<button class="qcard" data-croute="receipts/EXCEPTIONS">' +
       '<span class="qnum">' + receiptsByTab('EXCEPTIONS').length + '</span><span class="qlabel">Receipt Exceptions</span></button>' +
+    '</div>' +
+    /* Run 8: returns pipeline — pending, in inspection, ready for disposition,
+       completed, and returns with open exceptions. */
+    '<div class="sect">RETURNS</div>' +
+    '<div class="qcards">' +
+    '<button class="qcard" data-croute="returns/PENDING">' +
+      '<span class="qnum">' + returnsByTab('PENDING').length + '</span><span class="qlabel">Pending Returns</span></button>' +
+    '<button class="qcard" data-croute="returns/INSPECTION">' +
+      '<span class="qnum">' + returnsByTab('INSPECTION').length + '</span><span class="qlabel">In Inspection</span></button>' +
+    '<button class="qcard" data-croute="returns/READY FOR DISPOSITION">' +
+      '<span class="qnum">' + returnsByTab('READY FOR DISPOSITION').length + '</span><span class="qlabel">Ready for Disposition</span></button>' +
+    '<button class="qcard" data-croute="returns/EXCEPTIONS">' +
+      '<span class="qnum">' + returnsByTab('EXCEPTIONS').length + '</span><span class="qlabel">Return Exceptions</span></button>' +
     '</div>';
   return {
     html:
@@ -2067,6 +2090,16 @@ Screens['work-order'] = function (param) {
       }).join('') : '<p class="hint">No inventory assignments yet.</p>';
     })() +
     '<h2>Loadout</h2>' + loadoutSectionHtml(w) +
+    /* Run 8: returns linked to this work order. */
+    '<h2>Returns</h2>' + (function () {
+      var rets = (FG().returns || []).filter(function (x) { return x.workOrderId === w.id; });
+      if (!rets.length) return '<p class="hint">No returns for this work order.</p>';
+      return rets.map(function (r) {
+        return '<button class="rowbtn" data-woret="' + esc(r.id) + '"><div class="rhead"><b class="mono">' +
+          esc(r.number) + '</b> ' + returnStatusChip(r.status) + '</div>' +
+          '<div class="sub">' + esc(labelFor(RETURN_REASONS, r.reason)) + ' &middot; ' + fmtDT(r.createdAt) + '</div></button>';
+      }).join('');
+    })() +
     '<button class="btn btn-primary btn-huge" id="wo-cut">✂️ CUT ROLL FOR THIS ORDER</button>' +
     '<button class="btn btn-primary btn-huge" id="wo-inv">🗂️ CONTINUE TO INVENTORY</button>' +
     '</div>';
@@ -2075,6 +2108,10 @@ Screens['work-order'] = function (param) {
     if ($('#goroll')) $('#goroll').onclick = function () { go('roll', w.rollId); };
     if ($('#wo-so')) $('#wo-so').onclick = function () { go('sales-order', w.salesOrderId); };
     $('#wo-sj').onclick = function () { go('scheduled-job/' + w.id); };
+    /* Run 8: returns on the WO detail. */
+    Array.prototype.forEach.call(document.querySelectorAll('[data-woret]'), function (b) {
+      b.onclick = function () { go('return', b.getAttribute('data-woret')); };
+    });
     /* Run 7: loadout buttons on the WO detail. */
     if ($('#wo-startloadout')) $('#wo-startloadout').onclick = function () {
       run6Call(Repository.startLoadout(w.id), function (res) {
@@ -2785,12 +2822,15 @@ function soLineById(so, lineId) {
 function logOrderEvent(action, o) {
   o = o || {};
   FG().orderEvents.push({
-    id: rid('OE'), at: new Date().toISOString(),
+    id: rid('OE'), at: o.at || new Date().toISOString(),
     action: action, user: o.user || (DB.data && DB.data.currentEmployee) || '',
     warehouse: o.warehouse || (DB.data && DB.data.currentWarehouse) || '',
     orderId: o.orderId || null, orderNumber: o.orderNumber || null,
     salesOrderId: o.salesOrderId || null, salesOrderNumber: o.salesOrderNumber || null,
-    workOrderId: o.workOrderId || null, detail: o.detail || ''
+    workOrderId: o.workOrderId || null, detail: o.detail || '',
+    /* Run 8: return linkage + audit dedup key for shared-mode hydration. */
+    returnId: o.returnId || null, returnNumber: o.returnNumber || null,
+    loadoutId: o.loadoutId || null, auditId: o.auditId || null
   });
   DB.save();
 }
@@ -3831,6 +3871,635 @@ function receiptStatusChip(st) {
 
 
 
+/* ================= Run 8: Returns + Returned Material Disposition ================
+   Returns are a SEPARATE operational workflow from receiving: the material has
+   already been assigned, cut, possibly loaded out — and is now coming back.
+   CRITICAL BALANCE RULE: a scanned return NEVER changes trusted inventory.
+   Only an approved RESTOCK (supervisor+, version-checked, atomic) increases a
+   roll balance. Everything else creates separate records or events. */
+
+/* Label lookup for [value, label] pair lists. */
+function labelFor(pairs, value) {
+  var hit = (pairs || []).filter(function (p) { return p[0] === value; })[0];
+  return hit ? hit[1] : String(value || '');
+}
+
+var RETURN_STATUS = {
+  PENDING: 'PENDING', RECEIVED: 'RECEIVED', INSPECTION: 'INSPECTION',
+  READY_FOR_DISPOSITION: 'READY_FOR_DISPOSITION', COMPLETED: 'COMPLETED',
+  EXCEPTION: 'EXCEPTION', CANCELLED: 'CANCELLED'
+};
+var RETURN_ITEM_STATUS = {
+  PENDING: 'PENDING', MEASURED: 'MEASURED', INSPECTED: 'INSPECTED',
+  DISPOSITION_DECIDED: 'DISPOSITION_DECIDED', DISPOSITION_COMPLETE: 'DISPOSITION_COMPLETE',
+  EXCEPTION: 'EXCEPTION', CANCELLED: 'CANCELLED'
+};
+var RETURN_REASONS = [
+  ['JOB_CANCELLED', 'JOB CANCELLED'], ['EXCESS_MATERIAL', 'EXCESS MATERIAL'],
+  ['WRONG_MATERIAL', 'WRONG MATERIAL'], ['WRONG_QUANTITY', 'WRONG QUANTITY'],
+  ['DAMAGED', 'DAMAGED'], ['INSTALLATION_ISSUE', 'INSTALLATION ISSUE'],
+  ['CUSTOMER_RETURN', 'CUSTOMER / PROPERTY RETURN'], ['UNUSED_MATERIAL', 'UNUSED MATERIAL'],
+  ['OTHER', 'OTHER']
+];
+var RETURN_CONDITIONS = [
+  ['NEW_UNUSED', 'NEW / UNUSED'], ['GOOD', 'GOOD'], ['OPENED', 'OPENED'],
+  ['CUT_REMNANT', 'CUT REMNANT'], ['DAMAGED', 'DAMAGED'],
+  ['WET_CONTAMINATED', 'WET / CONTAMINATED'], ['UNKNOWN', 'UNKNOWN']
+];
+/* Conditions that may merge back into an existing trusted roll balance.
+   Anything else must become a remnant, be quarantined, scrapped, or vendor-returned. */
+var RESTOCKABLE_CONDITIONS = ['NEW_UNUSED', 'GOOD', 'OPENED', 'CUT_REMNANT'];
+var RETURN_DISPOSITIONS = [
+  ['RESTOCK', 'RESTOCK'], ['CREATE_REMNANT', 'CREATE RETURNED REMNANT'],
+  ['QUARANTINE', 'QUARANTINE'], ['SCRAP', 'SCRAP / DISPOSE'],
+  ['RETURN_TO_VENDOR', 'RETURN TO VENDOR'], ['HOLD_FOR_REVIEW', 'HOLD FOR REVIEW']
+];
+var RETURN_EXCEPTION_KINDS = [
+  ['UNKNOWN_MATERIAL', 'UNKNOWN MATERIAL'], ['UNKNOWN_SOURCE', 'UNKNOWN SOURCE'],
+  ['QUANTITY_MISMATCH', 'QUANTITY MISMATCH'], ['DAMAGED', 'DAMAGED'],
+  ['DUPLICATE_RETURN', 'DUPLICATE RETURN'], ['ROLL_MISMATCH', 'ROLL MISMATCH'],
+  ['INVALID_LOCATION', 'INVALID LOCATION'], ['CONDITION_ISSUE', 'CONDITION ISSUE'],
+  ['OTHER', 'OTHER']
+];
+var RETURN_DOC_TYPES = ['RETURN CONDITION PHOTO', 'RETURN PAPERWORK', 'RETURN LABEL'];
+var RETURN_SOURCE_KINDS = [
+  ['WORK_ORDER', 'WORK ORDER'], ['SALES_ORDER', 'SALES ORDER'], ['LOADOUT', 'LOADOUT'],
+  ['ROLL', 'ROLL / INVENTORY ITEM'], ['MANUAL', 'MANUAL / UNKNOWN SOURCE']
+];
+
+/* Run 8 collections (schema 6, additive). Idempotent — safe on fresh seeds
+   and migrated stores alike. */
+function migrateFloorguardV6toV7() {
+  var fg = DB.data.modules['floorguard'];
+  if (!fg) return;
+  if (!fg.returns) fg.returns = [];
+  if (!fg.returnItems) fg.returnItems = [];
+  if (!fg.returnDispositions) fg.returnDispositions = [];
+  if (!fg.returnedRemnants) fg.returnedRemnants = [];
+  if (!fg.returnExceptions) fg.returnExceptions = [];
+  if (!fg.returnActivity) fg.returnActivity = [];
+  if (!fg.returnDocuments) fg.returnDocuments = [];
+  if (!fg.restocks) fg.restocks = [];  /* append-only balance increases from approved restocks */
+  var s = fg.seq || (fg.seq = {});
+  if (!s['return']) s['return'] = 100001;
+  if (!s['remnant']) s['remnant'] = 100001;
+}
+DOC_NUMBER_KINDS['return'] = { prefix: 'RET-', seqKey: 'return', base: 100001 };
+DOC_NUMBER_KINDS['remnant'] = { prefix: 'REM-', seqKey: 'remnant', base: 100001 };
+function nextReturnNumber() { return nextLocalBusinessNumber('return'); }
+function nextRemnantNumber() { return nextLocalBusinessNumber('remnant'); }
+
+/* ---------- accessors ---------- */
+function returnById(id) { return (FG().returns || []).filter(function (r) { return r.id === id; })[0] || null; }
+function returnItemById(id) { return (FG().returnItems || []).filter(function (i) { return i.id === id; })[0] || null; }
+function returnItemsFor(returnId) { return (FG().returnItems || []).filter(function (i) { return i.returnId === returnId; }); }
+function returnDispositionsFor(itemId) { return (FG().returnDispositions || []).filter(function (d) { return d.returnItemId === itemId; }); }
+function remnantsForReturn(returnId) { return (FG().returnedRemnants || []).filter(function (r) { return r.returnId === returnId; }); }
+function remnantById(id) { return (FG().returnedRemnants || []).filter(function (r) { return r.id === id; })[0] || null; }
+/* Run 8: remnants safe to assign. Excludes quarantined/held/consumed/scrapped/
+   vendor-returned material and anything without a measured length. */
+function availableReturnedRemnants() {
+  return (FG().returnedRemnants || []).filter(function (r) {
+    return r.status === 'AVAILABLE' && (r.lengthIn || 0) > 0;
+  });
+}
+function returnExceptionsFor(returnId) { return (FG().returnExceptions || []).filter(function (e) { return e.returnId === returnId; }); }
+function openReturnExceptions() { return (FG().returnExceptions || []).filter(function (e) { return e.status === 'OPEN'; }); }
+function returnByNumber(num) {
+  var n = String(num || '').trim().toUpperCase();
+  return (FG().returns || []).filter(function (r) { return (r.number || '').toUpperCase() === n; })[0] || null;
+}
+function remnantByNumber(num) {
+  var n = String(num || '').trim().toUpperCase();
+  return (FG().returnedRemnants || []).filter(function (r) { return (r.number || '').toUpperCase() === n; })[0] || null;
+}
+/* Only AVAILABLE remnants may be offered for assignment. Everything else —
+   quarantined, scrapped, vendor-return, hold — is invisible to Assign Inventory. */
+function availableRemnants() {
+  return (FG().returnedRemnants || []).filter(function (r) { return r.status === 'AVAILABLE'; });
+}
+function returnDocuments(returnId) {
+  return (FG().documents || []).filter(function (d) { return d.kind === 'RETURN_DOCUMENT' && d.returnId === returnId; });
+}
+
+/* ---------- return authorization (local mirror of the server-side RPC gates) ---------- */
+function returnPolicy() {
+  var role = (DB.data && DB.data.employeeRoles && DB.data.currentEmployee)
+    ? (DB.data.employeeRoles[DB.data.currentEmployee] || '') : '';
+  var mgr = role === 'MANAGER' || role === 'ADMIN';
+  var sup = mgr || role === 'SUPERVISOR';
+  return {
+    role: role,
+    canCreateReturn: !!role,     /* create, receive, measure, photo, submit */
+    canReceiveReturn: !!role,
+    canMeasureReturn: !!role,
+    canInspectReturn: !!role,
+    canApproveRestock: sup,      /* approve restock, create/approve usable remnant */
+    canCreateRemnant: sup,
+    canQuarantine: sup,
+    canResolveReturnExceptions: sup,
+    canScrap: mgr,               /* scrap authorization */
+    canCancelReturn: mgr,
+    canVendorReturn: mgr
+  };
+}
+function returnPolicyRequire(ok, err) {
+  if (!ok) return { ok: false, err: err || 'NOT AUTHORIZED FOR THIS ACTION' };
+  return null;
+}
+
+/* ---------- return events: ride the shared orderEvents feed ----------
+   Every event carries returnId (+ workOrderId / salesOrderId where known) so
+   WO detail, SO activity, and loadout linkage all see the return trace. */
+var RETURN_EVENT_LABELS = {
+  RETURN_CREATED: 'RETURN CREATED', RETURN_RECEIVED: 'RETURN RECEIVED',
+  RETURN_MEASURED: 'RETURN MEASURED', RETURN_INSPECTED: 'RETURN INSPECTED',
+  RETURN_SUBMITTED: 'SUBMITTED FOR DISPOSITION',
+  RETURN_RESTOCKED: 'RETURN RESTOCKED', RETURN_REMNANT_CREATED: 'RETURNED REMNANT CREATED',
+  RETURN_QUARANTINED: 'RETURN QUARANTINED', RETURN_SCRAPPED: 'RETURN SCRAPPED',
+  RETURN_SENT_TO_VENDOR: 'SENT TO VENDOR', RETURN_COMPLETED: 'RETURN COMPLETED',
+  RETURN_CANCELLED: 'RETURN CANCELLED', RETURN_EXCEPTION_RAISED: 'RETURN EXCEPTION',
+  RETURN_EXCEPTION_RESOLVED: 'EXCEPTION RESOLVED', DOCUMENT_CAPTURED: 'DOCUMENT CAPTURED'
+};
+function logReturnEvent(action, o) {
+  o = o || {};
+  logOrderEvent(action, {
+    returnId: o.returnId || null, returnNumber: o.returnNumber || null,
+    workOrderId: o.workOrderId || null, salesOrderId: o.salesOrderId || null,
+    loadoutId: o.loadoutId || null, detail: o.detail || '',
+    user: o.user, warehouse: o.warehouse,
+    auditId: o.auditId || null, at: o.at || null
+  });
+}
+function returnEventsFor(returnId) {
+  return ((FG() && FG().orderEvents) || []).filter(function (e) { return e.returnId === returnId; })
+    .sort(function (a, b) { return new Date(b.at) - new Date(a.at); });
+}
+
+/* Roll-ledger entry for return activity (local mode). In shared mode the
+   backend RPCs write history_events rows which hydrate the same readers. */
+function logRollReturnEvent(rollId, action, o) {
+  o = o || {};
+  logAssignEvent(action, {
+    rollId: rollId, workOrderId: o.workOrderId || null,
+    detail: o.detail || '', user: o.user, quantityIn: o.quantityIn || null
+  });
+  /* Also mirror into returnActivity so the roll ledger can render it. */
+  var now = new Date().toISOString();
+  FG().returnActivity.push({
+    id: 'RA' + now.replace(/[^0-9]/g, '').slice(-8) + Math.floor(Math.random() * 999),
+    returnId: o.returnId || null, rollId: rollId, type: action,
+    detail: o.detail || '', quantityIn: o.quantityIn || null,
+    by: o.user || DB.data.currentEmployee,
+    warehouse: DB.data.currentWarehouse, at: now
+  });
+}
+
+/* Local idempotency ledger for return mutations (mirrors the backend
+   client_request_key behavior): a retried tap returns the original outcome. */
+function retIdem(key, fn) {
+  var fg = FG();
+  fg._retKeys = fg._retKeys || {};
+  if (key && fg._retKeys[key]) {
+    var cached = fg._retKeys[key];
+    /* Mark as duplicate on retry without mutating the cached record. */
+    var dup = {};
+    for (var k in cached) if (Object.prototype.hasOwnProperty.call(cached, k)) dup[k] = cached[k];
+    dup.duplicate = true;
+    return dup;
+  }
+  var out = fn();
+  if (key && out && out.ok) { fg._retKeys[key] = out; DB.save(); }
+  return out;
+}
+
+/* ---------- returns: local mutations ---------- */
+function createReturnLocal(h) {
+  h = h || {};
+  var pol = returnPolicyRequire(returnPolicy().canCreateReturn, 'NOT AUTHORIZED TO CREATE RETURNS');
+  if (pol) return pol;
+  if (h.reason === 'OTHER' && !String(h.notes || '').trim())
+    return { ok: false, err: 'NOTES REQUIRED', detail: 'Reason OTHER requires notes.' };
+  var now = new Date().toISOString();
+  /* Idempotency: the number is issued inside the idempotent block so a
+     retried tap does not burn a RET- number. */
+  return retIdem(h.requestKey, function () {
+    var id = h.id || rid('RT');
+    var rec = {
+      id: id, number: h.number || nextReturnNumber(),
+      warehouse: h.warehouse || DB.data.currentWarehouse,
+      workOrderId: h.workOrderId || null, salesOrderId: h.salesOrderId || null,
+      loadoutId: h.loadoutId || null, property: h.property || null, account: h.account || null,
+      sourceKind: h.sourceKind || 'MANUAL', reason: h.reason || 'OTHER',
+      status: RETURN_STATUS.PENDING, notes: h.notes || null,
+      createdBy: h.createdBy || DB.data.currentEmployee, receivedBy: null,
+      createdAt: now, receivedAt: null, completedAt: null, updatedAt: now,
+      requestKey: h.requestKey || null
+    };
+    FG().returns.push(rec); DB.save();
+    logReturnEvent('RETURN_CREATED', { returnId: rec.id, returnNumber: rec.number,
+      workOrderId: rec.workOrderId, salesOrderId: rec.salesOrderId, loadoutId: rec.loadoutId,
+      detail: 'Return ' + rec.number + ' created (' + labelFor(RETURN_REASONS, rec.reason) + ').' });
+    return { ok: true, return: rec, duplicate: false };
+  });
+}
+function receiveReturnLocal(id, opts) {
+  opts = opts || {};
+  var pol = returnPolicyRequire(returnPolicy().canReceiveReturn, 'NOT AUTHORIZED TO RECEIVE RETURNS');
+  if (pol) return pol;
+  var r = returnById(id);
+  if (!r) return { ok: false, err: 'RETURN NOT FOUND' };
+  if (r.status === RETURN_STATUS.COMPLETED || r.status === RETURN_STATUS.CANCELLED)
+    return { ok: false, err: 'RETURN IS ' + r.status };
+  if (r.status !== RETURN_STATUS.PENDING) return { ok: true, return: r, duplicate: true };
+  var now = new Date().toISOString();
+  r.status = RETURN_STATUS.RECEIVED; r.receivedBy = DB.data.currentEmployee;
+  r.receivedAt = now; r.updatedAt = now; DB.save();
+  logReturnEvent('RETURN_RECEIVED', { returnId: r.id, returnNumber: r.number,
+    workOrderId: r.workOrderId, salesOrderId: r.salesOrderId,
+    detail: 'Return ' + r.number + ' received by ' + DB.data.currentEmployee + '.' });
+  return { ok: true, return: r };
+}
+function addReturnItemLocal(returnId, it) {
+  it = it || {};
+  var pol = returnPolicyRequire(returnPolicy().canCreateReturn, 'NOT AUTHORIZED TO CREATE RETURNS');
+  if (pol) return pol;
+  var r = returnById(returnId);
+  if (!r) return { ok: false, err: 'RETURN NOT FOUND' };
+  if (r.status === RETURN_STATUS.COMPLETED || r.status === RETURN_STATUS.CANCELLED)
+    return { ok: false, err: 'RETURN IS ' + r.status };
+  var now = new Date().toISOString();
+  var rec = {
+    id: it.id || rid('RI'),
+    returnId: returnId, warehouse: r.warehouse,
+    materialType: it.materialType || 'CARPET', productId: it.productId || null,
+    rollId: it.rollId || null, sourceAssignmentId: it.sourceAssignmentId || null,
+    sourceLoadoutLineId: it.sourceLoadoutLineId || null,
+    style: it.style || null, color: it.color || null, widthIn: it.widthIn || null,
+    uom: it.uom || 'IN', returnedQuantity: it.returnedQuantity != null ? it.returnedQuantity : null,
+    measuredIn: null, measuredBy: null, measuredAt: null,
+    condition: null, disposition: null, status: RETURN_ITEM_STATUS.PENDING,
+    locationCode: it.locationCode || null, notes: it.notes || null,
+    createdAt: now, updatedAt: now, requestKey: it.requestKey || null
+  };
+  return retIdem(rec.requestKey, function () {
+    FG().returnItems.push(rec); DB.save();
+    return { ok: true, item: rec, duplicate: false };
+  });
+}
+/* MB stamp: records the RETURNED MEASURED BALANCE. Never touches the roll. */
+function measureReturnItemLocal(itemId, inches, opts) {
+  opts = opts || {};
+  var pol = returnPolicyRequire(returnPolicy().canMeasureReturn, 'NOT AUTHORIZED TO MEASURE RETURNS');
+  if (pol) return pol;
+  var it = returnItemById(itemId);
+  if (!it) return { ok: false, err: 'RETURN ITEM NOT FOUND' };
+  if (inches == null || inches < 0 || Math.floor(inches) !== inches)
+    return { ok: false, err: 'INVALID MEASUREMENT', detail: 'Use whole inches.' };
+  var now = new Date().toISOString();
+  it.measuredIn = inches; it.measuredBy = DB.data.currentEmployee; it.measuredAt = now;
+  if (it.status === RETURN_ITEM_STATUS.PENDING) it.status = RETURN_ITEM_STATUS.MEASURED;
+  it.updatedAt = now; DB.save();
+  var r = returnById(it.returnId);
+  logReturnEvent('RETURN_MEASURED', { returnId: it.returnId, returnNumber: r && r.number,
+    workOrderId: r && r.workOrderId, salesOrderId: r && r.salesOrderId,
+    detail: 'Measured ' + fmtLen(inches) + ' (MB=TRUE) by ' + DB.data.currentEmployee + '.' });
+  if (it.rollId) logRollReturnEvent(it.rollId, 'RETURN_MEASURED', {
+    workOrderId: r && r.workOrderId,
+    detail: 'Return ' + (r && r.number) + ' measured: ' + fmtLen(inches) + '. Awaiting disposition — trusted balance unchanged.' });
+  return { ok: true, item: it };
+}
+function inspectReturnItemLocal(itemId, condition, notes) {
+  var pol = returnPolicyRequire(returnPolicy().canInspectReturn, 'NOT AUTHORIZED TO INSPECT RETURNS');
+  if (pol) return pol;
+  var it = returnItemById(itemId);
+  if (!it) return { ok: false, err: 'RETURN ITEM NOT FOUND' };
+  if (it.status === RETURN_ITEM_STATUS.DISPOSITION_COMPLETE)
+    return { ok: false, err: 'ALREADY DISPOSITIONED' };
+  var now = new Date().toISOString();
+  it.condition = condition; if (notes != null) it.notes = notes;
+  it.status = RETURN_ITEM_STATUS.INSPECTED; it.updatedAt = now; DB.save();
+  var r = returnById(it.returnId);
+  if (r && (r.status === RETURN_STATUS.RECEIVED || r.status === RETURN_STATUS.PENDING)) {
+    r.status = RETURN_STATUS.INSPECTION; r.updatedAt = now; DB.save();
+  }
+  logReturnEvent('RETURN_INSPECTED', { returnId: it.returnId, returnNumber: r && r.number,
+    workOrderId: r && r.workOrderId, salesOrderId: r && r.salesOrderId,
+    detail: 'Condition recorded: ' + labelFor(RETURN_CONDITIONS, condition) + '.' });
+  if (it.rollId) logRollReturnEvent(it.rollId, 'RETURN_INSPECTED', {
+    workOrderId: r && r.workOrderId,
+    detail: 'Return ' + (r && r.number) + ' inspected: ' + labelFor(RETURN_CONDITIONS, condition) + '.' });
+  return { ok: true, item: it };
+}
+/* Submit for disposition: employee hands the inspected return to supervisors. */
+function submitReturnLocal(id) {
+  var pol = returnPolicyRequire(returnPolicy().canCreateReturn, 'NOT AUTHORIZED');
+  if (pol) return pol;
+  var r = returnById(id);
+  if (!r) return { ok: false, err: 'RETURN NOT FOUND' };
+  var items = returnItemsFor(id);
+  if (!items.length) return { ok: false, err: 'NO ITEMS', detail: 'Add at least one returned item.' };
+  var bad = items.filter(function (i) { return i.status !== RETURN_ITEM_STATUS.INSPECTED && i.status !== RETURN_ITEM_STATUS.MEASURED; });
+  if (bad.length) return { ok: false, err: 'ITEMS NOT INSPECTED', detail: bad.length + ' item(s) still need inspection.' };
+  r.status = RETURN_STATUS.READY_FOR_DISPOSITION; r.updatedAt = new Date().toISOString(); DB.save();
+  logReturnEvent('RETURN_SUBMITTED', { returnId: r.id, returnNumber: r.number,
+    workOrderId: r.workOrderId, salesOrderId: r.salesOrderId,
+    detail: items.length + ' item(s) submitted for disposition.' });
+  return { ok: true, return: r };
+}
+/* THE atomic balance change (local mirror of return_restock): supervisor+,
+   version-checked, all-or-nothing. */
+function approveRestockLocal(itemId, o) {
+  o = o || {};
+  var pol = returnPolicyRequire(returnPolicy().canApproveRestock, 'RESTOCK APPROVAL REQUIRES A SUPERVISOR OR ABOVE');
+  if (pol) return pol;
+  var it = returnItemById(itemId);
+  if (!it) return { ok: false, err: 'RETURN ITEM NOT FOUND' };
+  /* Idempotency first: a retried tap with the same key returns the original
+     result even though the item is now DISPOSITION_COMPLETE. */
+  var dupHit = o.requestKey && FG()._retKeys && FG()._retKeys[o.requestKey];
+  if (dupHit) {
+    var dup = {};
+    for (var dk in dupHit) if (Object.prototype.hasOwnProperty.call(dupHit, dk)) dup[dk] = dupHit[dk];
+    dup.duplicate = true;
+    return dup;
+  }
+  if (it.status === RETURN_ITEM_STATUS.DISPOSITION_COMPLETE)
+    return { ok: false, err: 'ALREADY DISPOSITIONED' };
+  var roll = o.rollId ? rollById(o.rollId) : (it.rollId ? rollById(it.rollId) : null);
+  if (!roll) return { ok: false, err: 'ROLL NOT FOUND', detail: 'Scan or select the roll to restock.' };
+  if (!it.condition || RESTOCKABLE_CONDITIONS.indexOf(it.condition) < 0)
+    return { ok: false, err: 'CONDITION NOT RESTOCKABLE',
+      detail: 'Condition ' + labelFor(RETURN_CONDITIONS, it.condition || 'UNKNOWN') +
+              ' cannot merge into a trusted roll. Use Create Remnant, Quarantine, or Scrap.' };
+  roll.version = roll.version || 1;
+  if (o.rollVersion != null && roll.version !== o.rollVersion)
+    return { ok: false, err: 'ROLL_VERSION_CONFLICT',
+      detail: 'ROLL UPDATED BY ANOTHER DEVICE',
+      previousBalanceIn: systemBalance(roll.id), currentVersion: roll.version };
+  var qty = it.measuredIn != null ? it.measuredIn : it.returnedQuantity;
+  if (qty == null || qty <= 0)
+    return { ok: false, err: 'NO QUANTITY', detail: 'Measure the return before restock.' };
+  var now = new Date().toISOString();
+  return retIdem(o.requestKey, function () {
+    var prev = systemBalance(roll.id);
+    var rec = { id: rid('RS'), rollId: roll.id, inches: qty, returnId: it.returnId,
+      returnItemId: it.id, by: DB.data.currentEmployee,
+      approvedBy: o.approver || DB.data.currentEmployee,
+      locationCode: o.locationCode || null, at: now };
+    FG().restocks.push(rec);
+    roll.version = roll.version + 1;
+    if (o.locationCode) roll.location = o.locationCode;
+    var nowBal = prev + qty;
+    FG().returnDispositions.push({ id: rid('RD'), returnId: it.returnId, returnItemId: it.id,
+      disposition: 'RESTOCK', decidedBy: DB.data.currentEmployee,
+      approvedBy: o.approver || DB.data.currentEmployee,
+      reason: 'Restock approved', locationCode: o.locationCode || null,
+      previousBalanceIn: prev, quantityIn: qty, newBalanceIn: nowBal, at: now });
+    it.disposition = 'RESTOCK'; it.status = RETURN_ITEM_STATUS.DISPOSITION_COMPLETE;
+    if (o.locationCode) it.locationCode = o.locationCode;
+    it.updatedAt = now; DB.save();
+    var r = returnById(it.returnId);
+    logReturnEvent('RETURN_RESTOCKED', { returnId: it.returnId, returnNumber: r && r.number,
+      workOrderId: r && r.workOrderId, salesOrderId: r && r.salesOrderId,
+      detail: 'Restocked ' + fmtLen(qty) + ' to roll ' + roll.id +
+              ' (' + fmtLen(prev) + ' → ' + fmtLen(nowBal) + '). Approved by ' + (o.approver || DB.data.currentEmployee) + '.' });
+    logRollReturnEvent(roll.id, 'RETURN_RESTOCK_APPROVED', { workOrderId: r && r.workOrderId,
+      returnId: it.returnId, quantityIn: qty,
+      detail: 'Restock approved: +' + fmtLen(qty) + ' from return ' + (r && r.number) + '.' });
+    logRollReturnEvent(roll.id, 'BALANCE_INCREASED_FROM_RETURN', { workOrderId: r && r.workOrderId,
+      returnId: it.returnId, quantityIn: qty,
+      detail: fmtLen(prev) + ' → ' + fmtLen(nowBal) + ' (return ' + (r && r.number) + ').' });
+    if (o.locationCode) logRollReturnEvent(roll.id, 'RETURN_LOCATION_ASSIGNED', { workOrderId: r && r.workOrderId,
+      returnId: it.returnId,
+      detail: 'Restock location: ' + o.locationCode + '.' });
+    return { ok: true, duplicate: false, previousBalanceIn: prev, quantityIn: qty,
+      newBalanceIn: nowBal, newVersion: roll.version, restock: rec };
+  });
+}
+/* Returned remnant: physically SEPARATE inventory. Never merged into the
+   parent roll's balance. Traceability: remnant → return → parent roll. */
+function createReturnedRemnantLocal(itemId, o) {
+  o = o || {};
+  var pol = returnPolicyRequire(returnPolicy().canCreateRemnant, 'REMNANT CREATION REQUIRES A SUPERVISOR OR ABOVE');
+  if (pol) return pol;
+  var it = returnItemById(itemId);
+  if (!it) return { ok: false, err: 'RETURN ITEM NOT FOUND' };
+  if (it.status === RETURN_ITEM_STATUS.DISPOSITION_COMPLETE)
+    return { ok: false, err: 'ALREADY DISPOSITIONED' };
+  var len = o.lengthIn != null ? o.lengthIn : (it.measuredIn != null ? it.measuredIn : it.returnedQuantity);
+  if (len == null || len <= 0 || Math.floor(len) !== len)
+    return { ok: false, err: 'INVALID LENGTH', detail: 'Remnant length must be positive whole inches.' };
+  var now = new Date().toISOString();
+  return retIdem(o.requestKey, function () {
+    var rem = { id: o.id || rid('REM'), number: nextRemnantNumber(),
+      parentRollId: it.rollId || null, returnId: it.returnId, returnItemId: it.id,
+      materialType: it.materialType, style: it.style, color: it.color, widthIn: it.widthIn,
+      lengthIn: len, condition: it.condition, locationCode: o.locationCode || null,
+      status: 'AVAILABLE', createdBy: DB.data.currentEmployee, createdAt: now, updatedAt: now,
+      requestKey: o.requestKey || null };
+    FG().returnedRemnants.push(rem);
+    FG().returnDispositions.push({ id: rid('RD'), returnId: it.returnId, returnItemId: it.id,
+      disposition: 'RESTOCK', decidedBy: DB.data.currentEmployee, approvedBy: DB.data.currentEmployee,
+      reason: 'Returned remnant ' + rem.number + ' created', locationCode: o.locationCode || null,
+      quantityIn: len, at: now });
+    it.disposition = 'RESTOCK'; it.status = RETURN_ITEM_STATUS.DISPOSITION_COMPLETE;
+    if (o.locationCode) it.locationCode = o.locationCode;
+    it.updatedAt = now; DB.save();
+    var r = returnById(it.returnId);
+    logReturnEvent('RETURN_REMNANT_CREATED', { returnId: it.returnId, returnNumber: r && r.number,
+      workOrderId: r && r.workOrderId, salesOrderId: r && r.salesOrderId,
+      detail: 'Returned remnant ' + rem.number + ' (' + fmtLen(len) + ') created — separate inventory, not merged into parent roll.' });
+    if (it.rollId) logRollReturnEvent(it.rollId, 'RETURN_REMNANT_CREATED', { workOrderId: r && r.workOrderId,
+      detail: 'Returned remnant ' + rem.number + ' (' + fmtLen(len) + ') created from return ' + (r && r.number) + '. Parent balance unchanged.' });
+    return { ok: true, duplicate: false, remnant: rem };
+  });
+}
+function quarantineReturnItemLocal(itemId, o) {
+  o = o || {};
+  var pol = returnPolicyRequire(returnPolicy().canQuarantine, 'QUARANTINE REQUIRES A SUPERVISOR OR ABOVE');
+  if (pol) return pol;
+  var it = returnItemById(itemId);
+  if (!it) return { ok: false, err: 'RETURN ITEM NOT FOUND' };
+  if (it.status === RETURN_ITEM_STATUS.DISPOSITION_COMPLETE)
+    return { ok: false, err: 'ALREADY DISPOSITIONED' };
+  if (!String(o.reason || '').trim()) return { ok: false, err: 'REASON REQUIRED', detail: 'A quarantine reason is required.' };
+  var now = new Date().toISOString();
+  return retIdem(o.requestKey, function () {
+    var hold = { id: rid('REM'), number: 'Q-' + rid('').slice(0, 8).toUpperCase(),
+      parentRollId: it.rollId || null, returnId: it.returnId, returnItemId: it.id,
+      materialType: it.materialType, style: it.style, color: it.color, widthIn: it.widthIn,
+      lengthIn: it.measuredIn != null ? it.measuredIn : (it.returnedQuantity || 0),
+      condition: it.condition, locationCode: o.locationCode || null,
+      status: 'QUARANTINED', createdBy: DB.data.currentEmployee, createdAt: now, updatedAt: now };
+    FG().returnedRemnants.push(hold);
+    FG().returnDispositions.push({ id: rid('RD'), returnId: it.returnId, returnItemId: it.id,
+      disposition: 'QUARANTINE', decidedBy: DB.data.currentEmployee, approvedBy: DB.data.currentEmployee,
+      reason: o.reason, locationCode: o.locationCode || null, at: now });
+    it.disposition = 'QUARANTINE'; it.status = RETURN_ITEM_STATUS.DISPOSITION_COMPLETE;
+    if (o.locationCode) it.locationCode = o.locationCode;
+    it.updatedAt = now; DB.save();
+    var r = returnById(it.returnId);
+    logReturnEvent('RETURN_QUARANTINED', { returnId: it.returnId, returnNumber: r && r.number,
+      workOrderId: r && r.workOrderId, salesOrderId: r && r.salesOrderId,
+      detail: 'Quarantined: ' + o.reason + '. NOT available for assignment.' });
+    if (it.rollId) logRollReturnEvent(it.rollId, 'RETURN_QUARANTINED', { workOrderId: r && r.workOrderId,
+      detail: 'Quarantined: ' + o.reason });
+    return { ok: true, duplicate: false, holding: hold };
+  });
+}
+function scrapReturnItemLocal(itemId, o) {
+  o = o || {};
+  var pol = returnPolicyRequire(returnPolicy().canScrap, 'SCRAP AUTHORIZATION REQUIRES A MANAGER OR ADMIN');
+  if (pol) return pol;
+  var it = returnItemById(itemId);
+  if (!it) return { ok: false, err: 'RETURN ITEM NOT FOUND' };
+  if (it.status === RETURN_ITEM_STATUS.DISPOSITION_COMPLETE)
+    return { ok: false, err: 'ALREADY DISPOSITIONED' };
+  if (!String(o.reason || '').trim()) return { ok: false, err: 'REASON REQUIRED', detail: 'A scrap reason is required.' };
+  var now = new Date().toISOString();
+  return retIdem(o.requestKey, function () {
+    FG().returnDispositions.push({ id: rid('RD'), returnId: it.returnId, returnItemId: it.id,
+      disposition: 'SCRAP', decidedBy: DB.data.currentEmployee, approvedBy: DB.data.currentEmployee,
+      reason: o.reason, at: now });
+    it.disposition = 'SCRAP'; it.status = RETURN_ITEM_STATUS.DISPOSITION_COMPLETE;
+    it.updatedAt = now; DB.save();
+    var r = returnById(it.returnId);
+    logReturnEvent('RETURN_SCRAPPED', { returnId: it.returnId, returnNumber: r && r.number,
+      workOrderId: r && r.workOrderId, salesOrderId: r && r.salesOrderId,
+      detail: 'Scrapped: ' + o.reason + '. Source inventory/history retained.' });
+    if (it.rollId) logRollReturnEvent(it.rollId, 'RETURN_SCRAPPED', { workOrderId: r && r.workOrderId,
+      detail: 'Scrapped: ' + o.reason });
+    return { ok: true, duplicate: false };
+  });
+}
+function sendReturnToVendorLocal(itemId, o) {
+  o = o || {};
+  var pol = returnPolicyRequire(returnPolicy().canVendorReturn, 'VENDOR RETURNS REQUIRE A MANAGER OR ADMIN');
+  if (pol) return pol;
+  var it = returnItemById(itemId);
+  if (!it) return { ok: false, err: 'RETURN ITEM NOT FOUND' };
+  if (it.status === RETURN_ITEM_STATUS.DISPOSITION_COMPLETE)
+    return { ok: false, err: 'ALREADY DISPOSITIONED' };
+  var now = new Date().toISOString();
+  return retIdem(o.requestKey, function () {
+    FG().returnDispositions.push({ id: rid('RD'), returnId: it.returnId, returnItemId: it.id,
+      disposition: 'RETURN_TO_VENDOR', decidedBy: DB.data.currentEmployee, approvedBy: DB.data.currentEmployee,
+      reason: 'Vendor return', vendorSupplier: o.supplier || null, vendorReference: o.reference || null,
+      vendorStatus: 'PENDING_VENDOR_RETURN', at: now });
+    it.disposition = 'RETURN_TO_VENDOR'; it.status = RETURN_ITEM_STATUS.DISPOSITION_COMPLETE;
+    it.updatedAt = now; DB.save();
+    var r = returnById(it.returnId);
+    logReturnEvent('RETURN_SENT_TO_VENDOR', { returnId: it.returnId, returnNumber: r && r.number,
+      workOrderId: r && r.workOrderId, salesOrderId: r && r.salesOrderId,
+      detail: 'Vendor return: ' + (o.supplier || 'unknown supplier') + (o.reference ? ' (' + o.reference + ')' : '') + '. No accounting in this run.' });
+    if (it.rollId) logRollReturnEvent(it.rollId, 'RETURN_SENT_TO_VENDOR', { workOrderId: r && r.workOrderId,
+      detail: 'Vendor return: ' + (o.supplier || 'unknown supplier') });
+    return { ok: true, duplicate: false, vendorStatus: 'PENDING_VENDOR_RETURN' };
+  });
+}
+function holdReturnItemLocal(itemId, reason) {
+  var pol = returnPolicyRequire(returnPolicy().canQuarantine, 'HOLD FOR REVIEW REQUIRES A SUPERVISOR OR ABOVE');
+  if (pol) return pol;
+  var it = returnItemById(itemId);
+  if (!it) return { ok: false, err: 'RETURN ITEM NOT FOUND' };
+  if (it.status === RETURN_ITEM_STATUS.DISPOSITION_COMPLETE)
+    return { ok: false, err: 'ALREADY DISPOSITIONED' };
+  it.disposition = 'HOLD_FOR_REVIEW'; it.status = RETURN_ITEM_STATUS.DISPOSITION_DECIDED;
+  if (reason) it.notes = reason;
+  it.updatedAt = new Date().toISOString(); DB.save();
+  return { ok: true, item: it };
+}
+function completeReturnLocal(id) {
+  var pol = returnPolicyRequire(returnPolicy().canApproveRestock, 'COMPLETING A RETURN REQUIRES A SUPERVISOR OR ABOVE');
+  if (pol) return pol;
+  var r = returnById(id);
+  if (!r) return { ok: false, err: 'RETURN NOT FOUND' };
+  if (r.status === RETURN_STATUS.COMPLETED) return { ok: true, return: r, duplicate: true };
+  if (r.status === RETURN_STATUS.CANCELLED) return { ok: false, err: 'RETURN IS CANCELLED' };
+  var open = returnItemsFor(id).filter(function (i) {
+    return i.status !== RETURN_ITEM_STATUS.DISPOSITION_COMPLETE && i.status !== RETURN_ITEM_STATUS.CANCELLED;
+  });
+  if (open.length) return { ok: false, err: 'ITEMS PENDING', detail: open.length + ' item(s) still need a completed disposition.' };
+  var now = new Date().toISOString();
+  r.status = RETURN_STATUS.COMPLETED; r.completedAt = now; r.updatedAt = now; DB.save();
+  logReturnEvent('RETURN_COMPLETED', { returnId: r.id, returnNumber: r.number,
+    workOrderId: r.workOrderId, salesOrderId: r.salesOrderId,
+    detail: 'Return ' + r.number + ' completed.' });
+  return { ok: true, return: r };
+}
+function cancelReturnLocal(id, reason) {
+  var pol = returnPolicyRequire(returnPolicy().canCancelReturn, 'CANCELLING A RETURN REQUIRES A MANAGER OR ADMIN');
+  if (pol) return pol;
+  var r = returnById(id);
+  if (!r) return { ok: false, err: 'RETURN NOT FOUND' };
+  if (r.status === RETURN_STATUS.COMPLETED) return { ok: false, err: 'A COMPLETED RETURN CANNOT BE CANCELLED' };
+  r.status = RETURN_STATUS.CANCELLED; if (reason) r.notes = reason;
+  r.updatedAt = new Date().toISOString(); DB.save();
+  logReturnEvent('RETURN_CANCELLED', { returnId: r.id, returnNumber: r.number,
+    workOrderId: r.workOrderId, salesOrderId: r.salesOrderId,
+    detail: 'Return ' + r.number + ' cancelled. History retained.' });
+  return { ok: true, return: r };
+}
+function raiseReturnExceptionLocal(returnId, o) {
+  o = o || {};
+  var pol = returnPolicyRequire(returnPolicy().canCreateReturn, 'NOT AUTHORIZED');
+  if (pol) return pol;
+  var r = returnById(returnId);
+  if (!r) return { ok: false, err: 'RETURN NOT FOUND' };
+  var now = new Date().toISOString();
+  var ex = { id: rid('RX'), returnId: returnId, returnItemId: o.itemId || null,
+    kind: o.kind || 'OTHER', detail: o.detail || null, status: 'OPEN',
+    raisedBy: DB.data.currentEmployee, resolvedBy: null, resolvedAt: null, createdAt: now };
+  FG().returnExceptions.push(ex);
+  if (r.status !== RETURN_STATUS.COMPLETED && r.status !== RETURN_STATUS.CANCELLED) {
+    r.status = RETURN_STATUS.EXCEPTION; r.updatedAt = now;
+  }
+  DB.save();
+  logReturnEvent('RETURN_EXCEPTION_RAISED', { returnId: r.id, returnNumber: r.number,
+    workOrderId: r.workOrderId, salesOrderId: r.salesOrderId,
+    detail: 'Exception: ' + labelFor(RETURN_EXCEPTION_KINDS, ex.kind) + (ex.detail ? ' — ' + ex.detail : '') });
+  return { ok: true, exception: ex };
+}
+function resolveReturnExceptionLocal(exceptionId, resolution) {
+  var pol = returnPolicyRequire(returnPolicy().canResolveReturnExceptions, 'RESOLVING EXCEPTIONS REQUIRES A SUPERVISOR OR ABOVE');
+  if (pol) return pol;
+  var ex = (FG().returnExceptions || []).filter(function (e) { return e.id === exceptionId; })[0];
+  if (!ex) return { ok: false, err: 'EXCEPTION NOT FOUND' };
+  var now = new Date().toISOString();
+  ex.status = 'RESOLVED'; ex.resolvedBy = DB.data.currentEmployee; ex.resolvedAt = now;
+  var stillOpen = (FG().returnExceptions || []).filter(function (e) { return e.returnId === ex.returnId && e.status === 'OPEN'; });
+  var r = returnById(ex.returnId);
+  if (!stillOpen.length && r && r.status === RETURN_STATUS.EXCEPTION) {
+    r.status = RETURN_STATUS.INSPECTION; r.updatedAt = now;
+  }
+  DB.save();
+  logReturnEvent('RETURN_EXCEPTION_RESOLVED', { returnId: ex.returnId, returnNumber: r && r.number,
+    detail: 'Exception resolved: ' + (resolution || 'resolved') });
+  return { ok: true, exception: ex };
+}
+function returnStatusChip(st) {
+  var map = { PENDING: 'chip', RECEIVED: 'chip chip-blue', INSPECTION: 'chip chip-amber',
+    READY_FOR_DISPOSITION: 'chip chip-amber', COMPLETED: 'chip chip-green',
+    EXCEPTION: 'chip chip-red', CANCELLED: 'chip chip-gray' };
+  return '<span class="' + (map[st] || 'chip') + '">' + esc(String(st || '').replace(/_/g, ' ')) + '</span>';
+}
+/* Source lineage: RETURN → LOADOUT → WORK ORDER → SALES ORDER → ORIGINAL ORDER. */
+function returnLineage(r) {
+  r = r || {};
+  var chain = [];
+  chain.push({ label: 'RETURN', value: r.number, go: 'return/' + r.id });
+  var lo = r.loadoutId ? loadoutById(r.loadoutId) : null;
+  if (lo) chain.push({ label: 'LOADOUT', value: lo.number, go: 'loadout/' + lo.id });
+  var wo = r.workOrderId ? woById(r.workOrderId) : null;
+  if (wo) chain.push({ label: 'WORK ORDER', value: wo.number || wo.id, go: 'work-order/' + wo.id });
+  var so = r.salesOrderId ? salesOrderById(r.salesOrderId) : null;
+  if (so) chain.push({ label: 'SALES ORDER', value: so.number || so.id, go: 'sales-order/' + so.id });
+  var ord = so && so.orderId ? orderById(so.orderId) : null;
+  if (ord) chain.push({ label: 'ORIGINAL ORDER', value: ord.number || ord.id, go: 'order/' + ord.id });
+  return chain;
+}
+
 /* ---- Property / account directory ----
    Reuses shared Property / Account entities — no duplicate records per
    order. Built from existing work orders, orders, and sales orders plus a
@@ -4510,11 +5179,24 @@ Screens['sales-order'] = function (param) {
     '<h2>Material lines</h2>' +
     (so.lines || []).map(lineHtml).join('') +
     '<h2>Actions</h2>' + actionsHtml() +
+    /* Run 8: returns linked to this sales order. */
+    '<h2>Returns</h2>' + (function () {
+      var rets = (FG().returns || []).filter(function (x) { return x.salesOrderId === so.id; });
+      if (!rets.length) return '<p class="hint">No returns for this sales order.</p>';
+      return rets.map(function (r) {
+        return '<button class="rowbtn" data-soret="' + esc(r.id) + '"><div class="rhead"><b class="mono">' +
+          esc(r.number) + '</b> ' + returnStatusChip(r.status) + '</div>' +
+          '<div class="sub">' + esc(labelFor(RETURN_REASONS, r.reason)) + ' &middot; ' + fmtDT(r.createdAt) + '</div></button>';
+      }).join('');
+    })() +
     '<h2>Activity</h2><div class="card">' + activityHtml() + '</div>' +
     '</div>';
 
   return { html: html, mount: function () {
     $('#back').onclick = function () { go('sales-orders', SOTAB); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-soret]'), function (b) {
+      b.onclick = function () { go('return', b.getAttribute('data-soret')); };
+    });
     Array.prototype.forEach.call(document.querySelectorAll('[data-wo]'), function (b) {
       b.onclick = function () { go('work-order', b.getAttribute('data-wo')); };
     });
@@ -4807,10 +5489,23 @@ Screens['loadout/detail'] = function (param) {
     (lo.status !== LOADOUT_STATUS.COMPLETED && pol.canCompleteLoadout ?
       '<button class="btn btn-primary btn-huge" id="lo-complete">COMPLETE LOADOUT</button>' : '') +
     exHtml +
+    /* Run 8: returns linked to this loadout. */
+    '<h2>Returns</h2>' + (function () {
+      var rets = (FG().returns || []).filter(function (x) { return x.loadoutId === lo.id; });
+      if (!rets.length) return '<p class="hint">No returns for this loadout.</p>';
+      return rets.map(function (r) {
+        return '<button class="rowbtn" data-loret="' + esc(r.id) + '"><div class="rhead"><b class="mono">' +
+          esc(r.number) + '</b> ' + returnStatusChip(r.status) + '</div>' +
+          '<div class="sub">' + esc(labelFor(RETURN_REASONS, r.reason)) + ' &middot; ' + fmtDT(r.createdAt) + '</div></button>';
+      }).join('');
+    })() +
     '<h2>Activity</h2><div class="card">' + actHtml + '</div>' +
     '</div>';
   return { html: html, mount: function () {
     $('#back').onclick = function () { LOVERIFY = null; go('loadout'); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-loret]'), function (b) {
+      b.onclick = function () { go('return', b.getAttribute('data-loret')); };
+    });
     if ($('#lo-begin')) $('#lo-begin').onclick = function () {
       run6Call(Repository.beginLoading(lo.id), function () { good(); render(); },
         function (err) { bad(); toast((err && err.message) || 'Could not begin loading.'); });
@@ -5293,6 +5988,709 @@ Screens['receipt/doc/review'] = function () {
 };
 
 
+/* ================= Run 8: Returns UI ================= */
+var RT8 = { q: '' };
+
+function returnTimelineHtml(returnId) {
+  var evs = returnActivityFor(returnId);
+  if (!evs.length) return '<p class="hint">No activity yet.</p>';
+  return evs.map(function (e) {
+    return '<div class="tl-row"><div class="tl-dot"></div><div><b>' + esc(e.type) + '</b>' +
+      (e.detail ? '<div class="sub">' + esc(e.detail) + '</div>' : '') +
+      '<div class="sub">' + esc(e.by || '') + ' &middot; ' + fmtDT(e.at) + '</div></div></div>';
+  }).join('');
+}
+
+function raiseExceptionDlg(r) {
+  var kinds = RETURN_EXCEPTION_KINDS.map(function (k) {
+    return '<option value="' + k[0] + '">' + k[1] + '</option>';
+  }).join('');
+  var items = returnItemsFor(r.id).map(function (i) {
+    return '<option value="' + esc(i.id) + '">Item — ' +
+      esc([i.style, i.color, fmtLen(i.measuredIn != null ? i.measuredIn : i.returnedQuantityIn)].filter(Boolean).join(' · ')) + '</option>';
+  }).join('');
+  showConfirm({
+    title: 'Raise exception',
+    body: '<div class="field"><label class="label">KIND</label><select class="input" id="ex-kind">' + kinds + '</select></div>' +
+      '<div class="field"><label class="label">ITEM (optional)</label><select class="input" id="ex-item">' +
+      '<option value="">Return-level</option>' + items + '</select></div>' +
+      '<div class="field"><label class="label">DETAIL</label><input class="input" id="ex-detail" autocomplete="off"></div>',
+    confirm: 'RAISE',
+    onConfirm: function () {
+      run6Call(Repository.raiseReturnException({
+        returnId: r.id,
+        itemId: $('#ex-item').value || null,
+        kind: $('#ex-kind').value,
+        detail: $('#ex-detail').value
+      }), function () { go('return', r.id); }, function (e) { toast(e.message || 'Raise failed.'); });
+    }
+  });
+}
+
+function returnTabs() {
+  return ['PENDING', 'INSPECTION', 'READY FOR DISPOSITION', 'COMPLETED', 'EXCEPTIONS'];
+}
+function returnsByTab(tab) {
+  var all = FG().returns || [];
+  if (tab === 'EXCEPTIONS')
+    return all.filter(function (r) {
+      return r.status === RETURN_STATUS.EXCEPTION ||
+        returnExceptionsFor(r.id).some(function (e) { return e.status === 'OPEN'; });
+    });
+  return all.filter(function (r) { return r.status === tab; });
+}
+function returnCardHtml(r) {
+  var items = returnItemsFor(r.id);
+  var done = items.filter(function (i) { return i.status === RETURN_ITEM_STATUS.DISPOSITION_COMPLETE; }).length;
+  var openEx = returnExceptionsFor(r.id).filter(function (e) { return e.status === 'OPEN'; }).length;
+  var src = '';
+  var wo = r.workOrderId ? woById(r.workOrderId) : null;
+  var so = r.salesOrderId ? salesOrderById(r.salesOrderId) : null;
+  if (wo) src = 'WO ' + (wo.number || wo.id);
+  else if (so) src = 'SO ' + (so.number || so.id);
+  else if (r.loadoutId) { var lo = loadoutById(r.loadoutId); src = 'LOADOUT ' + (lo ? lo.number : r.loadoutId); }
+  else src = labelFor(RETURN_SOURCE_KINDS, r.sourceKind);
+  return '<button class="rowbtn" data-return="' + esc(r.id) + '"><div class="rhead"><b class="mono">' +
+    esc(r.number) + '</b> ' + returnStatusChip(r.status) +
+    (openEx ? ' <span class="chip chip-red">⚠ ' + openEx + ' OPEN</span>' : '') + '</div>' +
+    '<div class="sub">' + esc(labelFor(RETURN_REASONS, r.reason)) + ' &middot; ' + esc(src) +
+    ' &middot; ' + done + '/' + items.length + ' dispositioned</div>' +
+    '<div class="sub">' + esc(r.property || '') + (r.property ? ' &middot; ' : '') + fmtDT(r.createdAt) + '</div></button>';
+}
+
+Screens['returns'] = function (param) {
+  var tab = String(param || 'PENDING').toUpperCase().replace(/_/g, ' ');
+  if (returnTabs().indexOf(tab) < 0) tab = 'PENDING';
+  var pol = returnPolicy();
+  var tabs = returnTabs().map(function (t) {
+    var n = returnsByTab(t).length;
+    return '<button class="fchip' + (t === tab ? ' on' : '') + '" data-tab="' + t + '">' + t +
+      ' <b class="badge">' + n + '</b></button>';
+  }).join('');
+  function cardHtml() {
+    var q = (RT8.q || '').toUpperCase();
+    var list = returnsByTab(tab).filter(function (r) {
+      if (!q) return true;
+      var items = returnItemsFor(r.id);
+      var hay = [r.number, r.reason, r.status, r.property, r.account, r.notes,
+        (r.workOrderId && woById(r.workOrderId) || {}).number,
+        (r.salesOrderId && salesOrderById(r.salesOrderId) || {}).number,
+        items.map(function (i) { return (i.style || '') + ' ' + (i.color || '') + ' ' + (i.rollId || ''); }).join(' ')
+      ].join(' ').toUpperCase();
+      return hay.indexOf(q) >= 0;
+    });
+    return list.length ? list.map(returnCardHtml).join('') : '<p class="hint">No returns here.</p>';
+  }
+  var html =
+    '<div class="screen">' +
+    pageHead('↩️ Returns', 'Material coming back — inspected before it touches stock') +
+    (pol.canCreateReturn ? '<button class="btn btn-primary btn-huge" id="rt-new">+ NEW RETURN</button>' : '') +
+    '<div class="chiprow">' + tabs + '</div>' +
+    '<div class="card"><div class="field"><label class="label" for="rt8-q">SEARCH</label>' +
+    '<input class="input" id="rt8-q" autocomplete="off" placeholder="Return #, WO, SO, roll, style…"></div></div>' +
+    '<div id="rt8-list">' + cardHtml() + '</div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    RT8.q = '';
+    if ($('#rt-new')) $('#rt-new').onclick = function () { go('return/new'); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tab]'), function (b) {
+      b.onclick = function () { go('returns', b.getAttribute('data-tab')); };
+    });
+    var qi = $('#rt8-q'), qt = null;
+    qi.addEventListener('input', function () {
+      clearTimeout(qt);
+      qt = setTimeout(function () {
+        RT8.q = qi.value; $('#rt8-list').innerHTML = cardHtml(); wireCards();
+      }, 250);
+    });
+    function wireCards() {
+      Array.prototype.forEach.call(document.querySelectorAll('[data-return]'), function (b) {
+        b.onclick = function () { go('return', b.getAttribute('data-return')); };
+      });
+    }
+    wireCards();
+  } };
+};
+
+
+/* ---------- /return/new ---------- */
+Screens['return/new'] = function () {
+  var pol = returnPolicy();
+  if (!pol.canCreateReturn)
+    return { html: '<div class="screen">' + pageHead('New return', 'Returns') +
+      '<div class="card"><p class="hint">Not authorized to create returns.</p></div></div>' };
+  var kinds = RETURN_SOURCE_KINDS.map(function (k) {
+    return '<option value="' + k[0] + '"' + (k[0] === 'WORK_ORDER' ? ' selected' : '') + '>' + k[1] + '</option>';
+  }).join('');
+  var reasons = RETURN_REASONS.map(function (r) {
+    return '<option value="' + r[0] + '">' + r[1] + '</option>';
+  }).join('');
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← RETURNS</button>' +
+    '<div class="step-head">NEW RETURN</div>' +
+    '<div class="card">' +
+    '<div class="field"><label class="label">SOURCE</label>' +
+    '<select class="input" id="nr-kind">' + kinds + '</select></div>' +
+    '<div class="field" id="nr-src-wo"><label class="label">WORK ORDER #</label>' +
+    '<input class="input mono" id="nr-wo" autocomplete="off" placeholder="e.g. WO-2001"></div>' +
+    '<div class="field" id="nr-src-so" hidden><label class="label">SALES ORDER #</label>' +
+    '<input class="input mono" id="nr-so" autocomplete="off" placeholder="e.g. SO-100245"></div>' +
+    '<div class="field" id="nr-src-load" hidden><label class="label">LOADOUT #</label>' +
+    '<input class="input mono" id="nr-load" autocomplete="off" placeholder="e.g. LOAD-100001"></div>' +
+    '<div class="field" id="nr-src-roll" hidden><label class="label">ROLL # / BARCODE</label>' +
+    '<input class="input mono" id="nr-roll" autocomplete="off" placeholder="e.g. 16628697"></div>' +
+    '<div class="field"><label class="label">REASON FOR RETURN</label>' +
+    '<select class="input" id="nr-reason">' + reasons + '</select></div>' +
+    '<div class="field"><label class="label">PROPERTY (optional)</label>' +
+    '<input class="input" id="nr-prop" autocomplete="off"></div>' +
+    '<div class="field"><label class="label">ACCOUNT (optional)</label>' +
+    '<input class="input" id="nr-acct" autocomplete="off"></div>' +
+    '<div class="field"><label class="label">NOTES (optional)</label>' +
+    '<input class="input" id="nr-notes" autocomplete="off"></div>' +
+    '<div class="err" id="nr-err" hidden></div>' +
+    '<button class="btn btn-primary btn-huge" id="nr-go">CREATE RETURN</button>' +
+    '</div></div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('returns'); };
+    $('#nr-kind').onchange = function () {
+      var v = $('#nr-kind').value;
+      $('#nr-src-wo').hidden = v !== 'WORK_ORDER';
+      $('#nr-src-so').hidden = v !== 'SALES_ORDER';
+      $('#nr-src-load').hidden = v !== 'LOADOUT';
+      $('#nr-src-roll').hidden = v !== 'ROLL';
+    };
+    function fail(msg) { var e = $('#nr-err'); e.hidden = false; e.textContent = msg; }
+    $('#nr-go').onclick = function () {
+      $('#nr-err').hidden = true;
+      var kind = $('#nr-kind').value, input = {};
+      if (kind === 'WORK_ORDER') {
+        var wo = woByNumber($('#nr-wo').value) || woById($('#nr-wo').value);
+        if (!wo) return fail('Work order not found.');
+        input.workOrderId = wo.id; input.account = wo.account; input.property = wo.property;
+      } else if (kind === 'SALES_ORDER') {
+        var so = salesOrderByNumber($('#nr-so').value) || salesOrderById($('#nr-so').value);
+        if (!so) return fail('Sales order not found.');
+        input.salesOrderId = so.id; input.account = so.account; input.property = so.property;
+      } else if (kind === 'LOADOUT') {
+        var lo = loadoutByNumber($('#nr-load').value) || loadoutById($('#nr-load').value);
+        if (!lo) return fail('Loadout not found.');
+        input.loadoutId = lo.id;
+      } else if (kind === 'ROLL') {
+        var roll = rollByBarcode($('#nr-roll').value) || rollById($('#nr-roll').value);
+        if (!roll) return fail('Roll not found.');
+        input.prefillRollId = roll.id;
+      }
+      if ($('#nr-prop').value) input.property = $('#nr-prop').value;
+      if ($('#nr-acct').value) input.account = $('#nr-acct').value;
+      input.sourceKind = kind;
+      input.reason = $('#nr-reason').value;
+      input.notes = $('#nr-notes').value;
+      run6Call(Repository.createReturn(input), function (res) {
+        /* Jump straight to receiving so the roll can be scanned. */
+        go('return', res.id);
+      }, function (err) { fail(err && err.message ? err.message : 'Create failed.'); });
+    };
+  } };
+};
+
+/* ---------- /return/:id ---------- */
+Screens['return'] = function (param) {
+  var r = (FG().returns || []).filter(function (x) { return x.id === param || x.number === param; })[0];
+  if (!r)
+    return { html: '<div class="screen">' + pageHead('Return', 'Returns') +
+      '<div class="card"><p class="hint">Return not found.</p></div></div>' };
+  var pol = returnPolicy();
+  var items = returnItemsFor(r.id);
+  var docs = (FG().documents || []).filter(function (d) { return d.returnId === r.id; });
+  var exs = returnExceptionsFor(r.id);
+  var openEx = exs.filter(function (e) { return e.status === 'OPEN'; });
+
+  var srcLine = '';
+  var wo = r.workOrderId ? woById(r.workOrderId) : null;
+  var so = r.salesOrderId ? salesOrderById(r.salesOrderId) : null;
+  var lo = r.loadoutId ? loadoutById(r.loadoutId) : null;
+  if (wo) srcLine = '<button class="linklike" id="rt-wo">WO ' + esc(wo.number || wo.id) + '</button>';
+  else if (so) srcLine = '<button class="linklike" id="rt-so">SO ' + esc(so.number || so.id) + '</button>';
+  else if (lo) srcLine = '<button class="linklike" id="rt-lo">LOADOUT ' + esc(lo.number || lo.id) + '</button>';
+  else srcLine = esc(labelFor(RETURN_SOURCE_KINDS, r.sourceKind));
+
+  var itemRows = items.length ? items.map(function (it) {
+    var roll = it.rollId ? rollById(it.rollId) : null;
+    return '<button class="rowbtn" data-ritem="' + esc(it.id) + '"><div class="rhead"><b>' +
+      esc(roll ? (roll.number || roll.id) : (it.style || 'Item')) + '</b> ' +
+      returnItemStatusChip(it.status) + (it.condition ? ' ' + conditionChip(it.condition) : '') + '</div>' +
+      '<div class="sub">' + esc([it.style, it.color].filter(Boolean).join(' · ')) +
+      (it.measuredIn != null ? ' &middot; ' + fmtLen(it.measuredIn) : '') +
+      (it.disposition ? ' &middot; ' + esc(it.disposition) : '') + '</div></button>';
+  }).join('') : '<p class="hint">No items yet. Scan the first roll.</p>';
+
+  var docRows = docs.length ? docs.map(function (d) {
+    return '<button class="rowbtn" data-rdoc="' + esc(d.id) + '"><div class="rhead"><b>📄 ' +
+      esc(returnDocumentLabel(d.type)) + '</b> <span class="chip">' + esc(d.source || '') + '</span></div>' +
+      '<div class="sub">' + fmtDT(d.createdAt) + ' &middot; ' + esc(d.createdBy || '') + '</div></button>';
+  }).join('') : '<p class="hint">No return documents yet.</p>';
+
+  var exRows = exs.length ? exs.map(function (e) {
+    return '<div class="card card-flat"><div class="rhead"><b>⚠ ' + esc(labelFor(RETURN_EXCEPTION_KINDS, e.kind)) +
+      '</b> <span class="chip' + (e.status === 'OPEN' ? ' chip-red' : ' chip-green') + '">' + e.status + '</span></div>' +
+      (e.detail ? '<div class="sub">' + esc(e.detail) + '</div>' : '') +
+      '<div class="sub">' + esc(e.raisedBy || '') + ' &middot; ' + fmtDT(e.createdAt) +
+      (e.status === 'RESOLVED' ? ' &middot; resolved by ' + esc(e.resolvedBy || '') : '') + '</div>' +
+      (e.status === 'OPEN' && pol.canDispositionReturn ?
+        '<button class="btn btn-small" data-resolve-ex="' + esc(e.id) + '">RESOLVE</button>' : '') + '</div>';
+  }).join('') : '';
+
+  var act = '';
+  if (r.status === RETURN_STATUS.PENDING && pol.canReceiveReturn)
+    act += '<button class="btn btn-primary btn-huge" id="rt-receive">RECEIVE RETURN</button>';
+  if ((r.status === RETURN_STATUS.RECEIVED || r.status === RETURN_STATUS.INSPECTION) && pol.canAddReturnItem)
+    act += '<button class="btn btn-primary btn-huge" id="rt-add">+ SCAN / ADD ITEM</button>';
+  if (pol.canDispositionReturn)
+    act += '<button class="btn btn-huge" id="rt-doc">📄 ADD RETURN DOCUMENT</button>';
+  if (r.status !== RETURN_STATUS.COMPLETED && r.status !== RETURN_STATUS.CANCELLED && pol.canDispositionReturn)
+    act += '<button class="btn btn-huge" id="rt-exception">⚠ RAISE EXCEPTION</button>';
+  if (pol.canCompleteReturn && [RETURN_STATUS.RECEIVED, RETURN_STATUS.INSPECTION].indexOf(r.status) >= 0)
+    act += '<button class="btn btn-primary btn-huge" id="rt-complete">COMPLETE RETURN</button>';
+  if (r.status !== RETURN_STATUS.COMPLETED && r.status !== RETURN_STATUS.CANCELLED && pol.canDispositionReturn)
+    act += '<button class="btn btn-danger" id="rt-cancel">CANCEL RETURN</button>';
+
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← RETURNS</button>' +
+    pageHead('↩️ ' + esc(r.number), 'Return detail') +
+    '<div class="card"><div class="rhead">' + returnStatusChip(r.status) +
+    (openEx.length ? ' <span class="chip chip-red">⚠ ' + openEx.length + ' OPEN</span>' : '') + '</div>' +
+    '<div class="kv"><span>REASON</span><b>' + esc(labelFor(RETURN_REASONS, r.reason)) + '</b></div>' +
+    '<div class="kv"><span>SOURCE</span><b>' + srcLine + '</b></div>' +
+    (r.property ? '<div class="kv"><span>PROPERTY</span><b>' + esc(r.property) + '</b></div>' : '') +
+    (r.account ? '<div class="kv"><span>ACCOUNT</span><b>' + esc(r.account) + '</b></div>' : '') +
+    '<div class="kv"><span>CREATED</span><b>' + fmtDT(r.createdAt) + ' &middot; ' + esc(r.createdBy || '') + '</b></div>' +
+    (r.receivedAt ? '<div class="kv"><span>RECEIVED</span><b>' + fmtDT(r.receivedAt) + ' &middot; ' + esc(r.receivedBy || '') + '</b></div>' : '') +
+    (r.completedAt ? '<div class="kv"><span>COMPLETED</span><b>' + fmtDT(r.completedAt) + '</b></div>' : '') +
+    (r.notes ? '<div class="kv"><span>NOTES</span><b>' + esc(r.notes) + '</b></div>' : '') +
+    '<div class="warnbox">⚠️ <b>Balance rule:</b> receiving a return does NOT change inventory. ' +
+    'Only an approved restock increases a roll balance.</div></div>' +
+    act +
+    '<div class="sec-head">ITEMS (' + items.length + ')</div>' + itemRows +
+    '<div class="sec-head">RETURN DOCUMENTS (' + docs.length + ')</div>' + docRows +
+    (exRows ? '<div class="sec-head">EXCEPTIONS</div>' + exRows : '') +
+    '<div class="sec-head">ACTIVITY</div><div id="rt-timeline">' + returnTimelineHtml(r.id) + '</div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('returns'); };
+    var rb = $('#rt-receive'); if (rb) rb.onclick = function () {
+      run6Call(Repository.receiveReturn({ id: r.id }), function () { refresh(); }, function (e) { toast(e.message || 'Receive failed.'); });
+    };
+    var ab = $('#rt-add'); if (ab) ab.onclick = function () { go('return/item/new', r.id); };
+    var db = $('#rt-doc'); if (db) db.onclick = function () { go('return/doc', r.id); };
+    var eb = $('#rt-exception'); if (eb) eb.onclick = function () { raiseExceptionDlg(r); };
+    var cb = $('#rt-complete'); if (cb) cb.onclick = function () {
+      showConfirm({ title: 'Complete return?', body: 'All items must be disposition-complete.', confirm: 'COMPLETE',
+        onConfirm: function () {
+          run6Call(Repository.completeReturn({ id: r.id }), function () { refresh(); },
+            function (e) { toast(e.message || 'Complete failed.'); });
+        } });
+    };
+    var xb = $('#rt-cancel'); if (xb) xb.onclick = function () {
+      showConfirm({ title: 'Cancel return?', body: 'The return is cancelled; items already dispositioned stay done.', confirm: 'CANCEL RETURN', danger: true,
+        onConfirm: function () {
+          run6Call(Repository.cancelReturn({ id: r.id }), function () { refresh(); },
+            function (e) { toast(e.message || 'Cancel failed.'); });
+        } });
+    };
+    if ($('#rt-wo')) $('#rt-wo').onclick = function () { go('work-order', wo.id); };
+    if ($('#rt-so')) $('#rt-so').onclick = function () { go('sales-order', so.id); };
+    if ($('#rt-lo')) $('#rt-lo').onclick = function () { go('loadout', lo.id); };
+    Array.prototype.forEach.call(document.querySelectorAll('[data-ritem]'), function (b) {
+      b.onclick = function () { go('return/item', b.getAttribute('data-ritem')); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-rdoc]'), function (b) {
+      b.onclick = function () { go('return/doc/view', b.getAttribute('data-rdoc')); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-resolve-ex]'), function (b) {
+      b.onclick = function () {
+        run6Call(Repository.resolveReturnException({ exceptionId: b.getAttribute('data-resolve-ex') }),
+          function () { refresh(); }, function (e) { toast(e.message || 'Resolve failed.'); });
+      };
+    });
+    function refresh() { go('return', r.id); }
+  } };
+};
+
+/* ---------- /return/item/new/:returnId — scan / add an item ---------- */
+Screens['return/item/new'] = function (param) {
+  var r = (FG().returns || []).filter(function (x) { return x.id === param; })[0];
+  if (!r)
+    return { html: '<div class="screen">' + pageHead('Add item', 'Returns') +
+      '<div class="card"><p class="hint">Return not found.</p></div></div>' };
+  var pol = returnPolicy();
+  if (!pol.canAddReturnItem)
+    return { html: '<div class="screen">' + pageHead('Add item', 'Returns') +
+      '<div class="card"><p class="hint">Not authorized.</p></div></div>' };
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← ' + esc(r.number) + '</button>' +
+    '<div class="step-head">ADD RETURN ITEM</div>' +
+    '<div class="card">' +
+    '<div class="field"><label class="label">ROLL BARCODE (scan or type)</label>' +
+    '<div class="scanbox" id="ni-scanbox"></div>' +
+    '<input class="input mono" id="ni-roll" autocomplete="off" placeholder="Scan roll or type #…">' +
+    '</div>' +
+    '<div class="field"><label class="label">RETURNED QUANTITY</label>' +
+    '<div class="ftin"><input class="input" id="ni-ft" inputmode="numeric" placeholder="FT"><span>′</span>' +
+    '<input class="input" id="ni-in" inputmode="numeric" placeholder="IN"><span>″</span></div></div>' +
+    '<div class="field"><label class="label">STAGING LOCATION (optional)</label>' +
+    '<input class="input mono" id="ni-loc" autocomplete="off" placeholder="e.g. 205B"></div>' +
+    '<div class="field"><label class="label">STYLE (optional)</label>' +
+    '<input class="input" id="ni-style" autocomplete="off"></div>' +
+    '<div class="field"><label class="label">COLOR (optional)</label>' +
+    '<input class="input" id="ni-color" autocomplete="off"></div>' +
+    '<div class="field"><label class="label">NOTES (optional)</label>' +
+    '<input class="input" id="ni-notes" autocomplete="off"></div>' +
+    '<div class="err" id="ni-err" hidden></div>' +
+    '<button class="btn btn-primary btn-huge" id="ni-go">ADD ITEM</button>' +
+    '<p class="hint">Scanning does <b>not</b> change inventory balances.</p>' +
+    '</div></div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('return', r.id); };
+    mountScannerBox('ni-scanbox', function (code) {
+      $('#ni-roll').value = normalizeBarcode(code); good();
+    });
+    function fail(msg) { var e = $('#ni-err'); e.hidden = false; e.textContent = msg; }
+    $('#ni-go').onclick = function () {
+      $('#ni-err').hidden = true;
+      var ft = parseInt($('#ni-ft').value || '0', 10) || 0;
+      var inch = parseInt($('#ni-in').value || '0', 10) || 0;
+      var qty = ft * 12 + inch;
+      var code = $('#ni-roll').value.trim();
+      var roll = code ? (rollByBarcode(code) || rollById(code)) : null;
+      run6Call(Repository.addReturnItem({
+        returnId: r.id,
+        rollId: roll ? roll.id : null,
+        materialType: 'CARPET',
+        style: roll ? roll.style : ($('#ni-style').value || null),
+        color: roll ? roll.color : ($('#ni-color').value || null),
+        widthIn: roll ? roll.widthIn : null,
+        returnedQuantity: qty > 0 ? qty : null,
+        locationCode: $('#ni-loc').value || null,
+        notes: $('#ni-notes').value || null
+      }), function (res) { go('return/item', res.id); }, function (e) { fail(e.message || 'Add failed.'); });
+    };
+  } };
+};
+
+/* ---------- /return/item/:itemId ---------- */
+Screens['return/item'] = function (param) {
+  var it = (FG().returnItems || []).filter(function (x) { return x.id === param; })[0];
+  if (!it)
+    return { html: '<div class="screen">' + pageHead('Return item', 'Returns') +
+      '<div class="card"><p class="hint">Item not found.</p></div></div>' };
+  var r = (FG().returns || []).filter(function (x) { return x.id === it.returnId; })[0];
+  var pol = returnPolicy();
+  var roll = it.rollId ? rollById(it.rollId) : null;
+  var disp = (FG().returnDispositions || []).filter(function (d) { return d.returnItemId === it.id; });
+  var remnant = (FG().returnedRemnants || []).filter(function (m) { return m.returnItemId === it.id; })[0];
+
+  var dispHtml = disp.length ? disp.map(function (d) {
+    return '<div class="card card-flat"><div class="rhead"><b>' + esc(d.disposition) + '</b>' +
+      ' <span class="chip">' + fmtDT(d.createdAt) + '</span></div>' +
+      '<div class="sub">' + esc(d.reason || '') +
+      (d.quantityIn != null ? ' &middot; ' + d.quantityIn + 'in' : '') +
+      (d.locationCode ? ' &middot; ' + esc(d.locationCode) : '') + '</div>' +
+      '<div class="sub">Decided by ' + esc(d.decidedBy || '') +
+      (d.approvedBy && d.approvedBy !== d.decidedBy ? ' &middot; approved by ' + esc(d.approvedBy) : '') + '</div></div>';
+  }).join('') : '';
+
+  var remnantHtml = remnant ?
+    '<div class="card card-flat"><div class="rhead"><b>🏷️ ' + esc(remnant.number) + '</b> ' +
+    '<span class="chip' + (remnant.status === 'AVAILABLE' ? ' chip-green' : '') + '">' + remnant.status + '</span></div>' +
+    '<div class="sub">' + fmtLen(remnant.lengthIn) + ' &middot; ' + esc([remnant.style, remnant.color].filter(Boolean).join(' · ')) +
+    (remnant.locationCode ? ' &middot; ' + esc(remnant.locationCode) : '') + '</div></div>' : '';
+
+  var measureHtml = (it.status === RETURN_ITEM_STATUS.PENDING || it.status === RETURN_ITEM_STATUS.MEASURED) && pol.canMeasureReturn ?
+    '<div class="card"><div class="sec-head">MEASURE</div>' +
+    '<div class="field"><label class="label">MEASURED LENGTH</label>' +
+    '<div class="ftin"><input class="input" id="mi-ft" inputmode="numeric" placeholder="FT"><span>′</span>' +
+    '<input class="input" id="mi-in" inputmode="numeric" placeholder="IN"><span>″</span></div></div>' +
+    '<button class="btn btn-primary" id="mi-go">SAVE MEASUREMENT</button></div>' : '';
+
+  var inspectHtml = (it.status !== RETURN_ITEM_STATUS.DISPOSITION_COMPLETE && it.status !== RETURN_ITEM_STATUS.CANCELLED) && pol.canInspectReturn ?
+    '<div class="card"><div class="sec-head">INSPECT</div>' +
+    '<div class="field"><label class="label">CONDITION</label><select class="input" id="ii-cond">' +
+    RETURN_CONDITIONS.map(function (c) {
+      return '<option value="' + c[0] + '"' + (it.condition === c[0] ? ' selected' : '') + '>' + c[1] + '</option>';
+    }).join('') + '</select></div>' +
+    '<div class="field"><label class="label">INSPECTION NOTES</label>' +
+    '<input class="input" id="ii-notes" autocomplete="off" value="' + esc(it.notes || '') + '"></div>' +
+    '<button class="btn btn-primary" id="ii-go">SAVE INSPECTION</button></div>' : '';
+
+  var dispoHtml = '';
+  if (it.status !== RETURN_ITEM_STATUS.DISPOSITION_COMPLETE && it.status !== RETURN_ITEM_STATUS.CANCELLED && pol.canDispositionReturn) {
+    dispoHtml = '<div class="card"><div class="sec-head">DISPOSITION</div>' +
+      '<button class="btn btn-huge" id="di-restock">📦 RESTOCK TO ROLL…</button>' +
+      '<button class="btn btn-huge" id="di-remnant">🏷️ CREATE RETURNED REMNANT…</button>' +
+      '<button class="btn btn-huge" id="di-quar">🔒 QUARANTINE…</button>' +
+      '<button class="btn btn-huge" id="di-hold">⏸ HOLD FOR REVIEW</button>';
+    if (pol.canScrapReturn) dispoHtml += '<button class="btn btn-danger btn-huge" id="di-scrap">🗑 SCRAP…</button>';
+    if (pol.canSendToVendor) dispoHtml += '<button class="btn btn-huge" id="di-vendor">🚚 RETURN TO VENDOR…</button>';
+    dispoHtml += '</div>';
+  }
+
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← ' + esc(r ? r.number : 'RETURN') + '</button>' +
+    pageHead('Return item', 'Returns') +
+    '<div class="card"><div class="rhead"><b>' + esc(roll ? (roll.number || roll.id) : 'Unknown roll') + '</b> ' +
+    returnItemStatusChip(it.status) + (it.condition ? ' ' + conditionChip(it.condition) : '') + '</div>' +
+    '<div class="kv"><span>MATERIAL</span><b>' + esc([it.style, it.color, it.widthIn ? fmtLen(it.widthIn) + ' wide' : ''].filter(Boolean).join(' · ')) + '</b></div>' +
+    (it.returnedQuantityIn != null ? '<div class="kv"><span>DECLARED</span><b>' + fmtLen(it.returnedQuantityIn) + '</b></div>' : '') +
+    (it.measuredIn != null ? '<div class="kv"><span>MEASURED</span><b>' + fmtLen(it.measuredIn) +
+      ' &middot; ' + esc(it.measuredBy || '') + ' &middot; ' + fmtDT(it.measuredAt) + '</b></div>' : '') +
+    (roll ? '<div class="kv"><span>ROLL BALANCE</span><b>' + fmtLen(systemBalance(roll.id)) + ' (untouched by this return)</b></div>' : '') +
+    (it.locationCode ? '<div class="kv"><span>STAGING</span><b>' + esc(it.locationCode) + '</b></div>' : '') +
+    (it.notes ? '<div class="kv"><span>NOTES</span><b>' + esc(it.notes) + '</b></div>' : '') + '</div>' +
+    measureHtml + inspectHtml + dispoHtml +
+    (dispHtml ? '<div class="sec-head">DISPOSITION RECORD</div>' + dispHtml : '') +
+    (remnantHtml ? '<div class="sec-head">RETURNED REMNANT</div>' + remnantHtml : '') +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { if (r) go('return', r.id); else go('returns'); };
+    var mg = $('#mi-go');
+    if (mg) mg.onclick = function () {
+      var ft = parseInt($('#mi-ft').value || '0', 10) || 0;
+      var inch = parseInt($('#mi-in').value || '0', 10) || 0;
+      run6Call(Repository.measureReturnItem({ itemId: it.id, measuredIn: ft * 12 + inch }),
+        function () { go('return/item', it.id); }, function (e) { toast(e.message || 'Measure failed.'); });
+    };
+    var ig = $('#ii-go');
+    if (ig) ig.onclick = function () {
+      run6Call(Repository.inspectReturnItem({ itemId: it.id, condition: $('#ii-cond').value, notes: $('#ii-notes').value }),
+        function () { go('return/item', it.id); }, function (e) { toast(e.message || 'Inspect failed.'); });
+    };
+    var rs = $('#di-restock'); if (rs) rs.onclick = function () { restockDlg(it, roll); };
+    var rm = $('#di-remnant'); if (rm) rm.onclick = function () { remnantDlg(it); };
+    var q = $('#di-quar'); if (q) q.onclick = function () { quarantineDlg(it); };
+    var h = $('#di-hold'); if (h) h.onclick = function () {
+      showConfirm({ title: 'Hold for review?', confirm: 'HOLD',
+        body: '<div class="field"><label class="label">REASON</label><input class="input" id="h-reason"></div>',
+        onConfirm: function () {
+          run6Call(Repository.holdReturnItem({ itemId: it.id, reason: $('#h-reason').value }),
+            function () { go('return/item', it.id); }, function (e) { toast(e.message || 'Hold failed.'); });
+        } });
+    };
+    var sc = $('#di-scrap'); if (sc) sc.onclick = function () { scrapDlg(it); };
+    var v = $('#di-vendor'); if (v) v.onclick = function () { vendorDlg(it); };
+  } };
+};
+
+function restockDlg(it, roll) {
+  var qty = it.measuredIn != null ? it.measuredIn : it.returnedQuantityIn;
+  var condOk = it.condition && ['NEW_UNUSED', 'GOOD', 'OPENED', 'CUT_REMNANT'].indexOf(it.condition) >= 0;
+  var body =
+    '<div class="kv"><span>CONDITION</span><b>' + esc(it.condition ? labelFor(RETURN_CONDITIONS, it.condition) : 'NOT INSPECTED') + '</b></div>' +
+    '<div class="kv"><span>QUANTITY</span><b>' + (qty != null ? fmtLen(qty) : 'NOT MEASURED') + '</b></div>' +
+    (roll ? '<div class="kv"><span>ROLL</span><b>' + esc(roll.number || roll.id) + ' — ' + fmtLen(systemBalance(roll.id)) + '</b></div>' : '') +
+    '<div class="field"><label class="label">TARGET ROLL # / BARCODE</label>' +
+    '<input class="input mono" id="rs-roll" value="' + esc(it.rollId || '') + '"></div>' +
+    '<div class="field"><label class="label">STORAGE LOCATION</label>' +
+    '<input class="input mono" id="rs-loc" value="' + esc(it.locationCode || '') + '"></div>' +
+    (condOk ? '' : '<div class="warnbox">⚠️ Condition must be NEW / GOOD / OPENED / CUT REMNANT before restock.</div>') +
+    '<div class="warnbox">⚠️ Restock increases the roll balance by ' + (qty != null ? fmtLen(qty) : '?') +
+    '. This is the <b>only</b> return action that changes inventory.</div>';
+  showConfirm({
+    title: 'Approve restock', body: body, confirm: 'APPROVE RESTOCK',
+    onConfirm: function () {
+      var target = rollByBarcode($('#rs-roll').value) || rollById($('#rs-roll').value);
+      if (!target) { toast('Target roll not found.'); return; }
+      run6Call(Repository.approveRestock({
+        itemId: it.id, rollId: target.id, locationCode: $('#rs-loc').value || null
+      }), function (res) {
+        toast('Restocked: ' + fmtLen(res.newBalanceIn) + '.');
+        go('return/item', it.id);
+      }, function (e) { toast(e.message || 'Restock failed.'); });
+    }
+  });
+}
+
+function remnantDlg(it) {
+  var body =
+    '<p class="hint">Creates an independently traceable returned remnant with its own <b>REM-#</b>. ' +
+    'The parent roll balance does <b>not</b> change.</p>' +
+    '<div class="field"><label class="label">REMNANT LENGTH</label>' +
+    '<div class="ftin"><input class="input" id="rm-ft" inputmode="numeric" placeholder="FT"><span>′</span>' +
+    '<input class="input" id="rm-in" inputmode="numeric" placeholder="IN"><span>″</span></div></div>' +
+    '<div class="field"><label class="label">STORAGE LOCATION</label>' +
+    '<input class="input mono" id="rm-loc" value="' + esc(it.locationCode || '') + '"></div>';
+  showConfirm({
+    title: 'Create returned remnant', body: body, confirm: 'CREATE REMNANT',
+    onConfirm: function () {
+      var ft = parseInt($('#rm-ft').value || '0', 10) || 0;
+      var inch = parseInt($('#rm-in').value || '0', 10) || 0;
+      run6Call(Repository.createReturnedRemnant({
+        itemId: it.id, lengthIn: ft * 12 + inch, locationCode: $('#rm-loc').value || null
+      }), function (res) {
+        toast('Remnant ' + res.remnantNumber + ' created.');
+        go('return/item', it.id);
+      }, function (e) { toast(e.message || 'Remnant failed.'); });
+    }
+  });
+}
+
+function quarantineDlg(it) {
+  showConfirm({
+    title: 'Quarantine material',
+    body: '<p class="hint">Material is moved to quarantine and cannot be assigned until released.</p>' +
+      '<div class="field"><label class="label">REASON (required)</label><input class="input" id="q-reason"></div>' +
+      '<div class="field"><label class="label">QUARANTINE LOCATION</label><input class="input mono" id="q-loc" value="' +
+      esc(it.locationCode || '') + '"></div>',
+    confirm: 'QUARANTINE', danger: true,
+    onConfirm: function () {
+      if (!$('#q-reason').value.trim()) { toast('A reason is required.'); return; }
+      run6Call(Repository.quarantineReturnItem({ itemId: it.id, reason: $('#q-reason').value, locationCode: $('#q-loc').value || null }),
+        function () { go('return/item', it.id); }, function (e) { toast(e.message || 'Quarantine failed.'); });
+    }
+  });
+}
+
+function scrapDlg(it) {
+  showConfirm({
+    title: 'Scrap material',
+    body: '<div class="field"><label class="label">REASON (required)</label><input class="input" id="s-reason"></div>',
+    confirm: 'SCRAP', danger: true,
+    onConfirm: function () {
+      if (!$('#s-reason').value.trim()) { toast('A reason is required.'); return; }
+      run6Call(Repository.scrapReturnItem({ itemId: it.id, reason: $('#s-reason').value }),
+        function () { go('return/item', it.id); }, function (e) { toast(e.message || 'Scrap failed.'); });
+    }
+  });
+}
+
+function vendorDlg(it) {
+  showConfirm({
+    title: 'Return to vendor',
+    body: '<div class="field"><label class="label">SUPPLIER</label><input class="input" id="v-sup"></div>' +
+      '<div class="field"><label class="label">REFERENCE (RMA / BOL)</label><input class="input" id="v-ref"></div>',
+    confirm: 'SEND TO VENDOR',
+    onConfirm: function () {
+      run6Call(Repository.sendReturnToVendor({ itemId: it.id, supplier: $('#v-sup').value, reference: $('#v-ref').value }),
+        function () { go('return/item', it.id); }, function (e) { toast(e.message || 'Vendor return failed.'); });
+    }
+  });
+}
+
+function returnDocumentLabel(type) {
+  var hit = RETURN_DOCUMENT_TYPES.filter(function (t) { return t[0] === type; })[0];
+  return hit ? hit[1] : String(type || 'Document');
+}
+
+/* ---------- /return/doc — capture ---------- */
+Screens['return/doc'] = function (param) {
+  var r = (FG().returns || []).filter(function (x) { return x.id === param; })[0];
+  if (!r) { setTimeout(function () { go('returns'); }, 0); return { html: '' }; }
+  if (typeof D !== 'undefined') {
+    D = { returnId: r.id, returnTo: { name: 'return', param: r.id } };
+  }
+  var html =
+    '<div class="screen">' +
+    '<div class="step-head">CAPTURE DOCUMENT</div>' +
+    '<div class="card" style="text-align:center">' +
+    '<div class="label">DOCUMENT FOR RETURN</div>' +
+    '<div class="mono" style="font-size:2rem;font-weight:900">' + esc(r.number) + '</div></div>' +
+    '<p class="hint">Photograph the return paperwork, condition photos, or customer documentation. ' +
+    'The photo becomes part of the return&rsquo;s permanent record — it is a <b>return document</b>, never a History Card.</p>' +
+    '<input type="file" id="docfile" accept="image/*" capture="environment" hidden>' +
+    '<button class="btn btn-primary btn-huge" id="takephoto">📷 TAKE PHOTO</button>' +
+    '<button class="btn btn-ghost" id="dccancel">CANCEL</button>' +
+    '<div class="err" id="dcerr" hidden></div></div>';
+  return { html: html, mount: function () {
+    $('#takephoto').onclick = function () { $('#docfile').click(); };
+    $('#dccancel').onclick = function () { D = null; go('return', r.id); };
+    $('#docfile').onchange = function () {
+      var f = $('#docfile').files[0];
+      if (!f) return;
+      var e = $('#dcerr'); e.hidden = true;
+      var rd = new FileReader();
+      rd.onload = function () {
+        downscaleImage(rd.result, 1280, 0.72, function (img) {
+          if (!img) { bad(); e.textContent = 'Could not read that photo. Try again.'; e.hidden = false; return; }
+          downscaleImage(rd.result, 320, 0.6, function (th) {
+            D.image = img; D.thumb = th || img;
+            good(); go('return/doc/review');
+          });
+        });
+      };
+      rd.onerror = function () { bad(); e.textContent = 'Could not read that photo. Try again.'; e.hidden = false; };
+      rd.readAsDataURL(f);
+    };
+  } };
+};
+
+Screens['return/doc/review'] = function () {
+  if (typeof D === 'undefined' || !D || !D.image) { setTimeout(function () { go('returns'); }, 0); return { html: '' }; }
+  var r = (FG().returns || []).filter(function (x) { return x.id === D.returnId; })[0];
+  var typeOpts = RETURN_DOCUMENT_TYPES.map(function (t) {
+    return '<option value="' + t[0] + '">' + t[1] + '</option>';
+  }).join('');
+  var html =
+    '<div class="screen">' +
+    '<div class="step-head">REVIEW DOCUMENT</div>' +
+    '<div class="card" style="text-align:center"><img src="' + D.image + '" style="max-width:100%"></div>' +
+    '<div class="card"><div class="field"><label class="label">DOCUMENT TYPE</label>' +
+    '<select class="input" id="dt-type">' + typeOpts + '</select></div>' +
+    '<div class="field"><label class="label">NOTES (optional)</label>' +
+    '<input class="input" id="dt-notes" autocomplete="off"></div></div>' +
+    '<button class="btn btn-primary btn-huge" id="dc-use">USE PHOTO</button>' +
+    '<button class="btn" id="dc-retake">RETAKE</button>' +
+    '<button class="btn btn-ghost" id="dc-cancel">CANCEL</button>' +
+    '<div class="err" id="dcerr" hidden></div></div>';
+  return { html: html, mount: function () {
+    $('#dc-retake').onclick = function () { go('return/doc', D.returnId); };
+    $('#dc-cancel').onclick = function () { var rid = D.returnId; D = null; go('return', rid); };
+    $('#dc-use').onclick = function () {
+      var rid = D.returnId, img = D.image, th = D.thumb;
+      var type = $('#dt-type').value, notes = $('#dt-notes').value;
+      var e = $('#dcerr'); e.hidden = true;
+      run6Call(Repository.uploadReturnDocument({ returnId: rid,
+        imageDataUrl: img, thumbDataUrl: th, mimeType: 'image/jpeg',
+        type: type, notes: notes, employee: DB.data.currentEmployee }), function () {
+        logReturnEvent('RETURN_DOCUMENT_CAPTURED', { returnId: rid,
+          returnNumber: (r || {}).number,
+          detail: returnDocumentLabel(type) + ' captured by ' + DB.data.currentEmployee + '.' });
+        D = null; good();
+        go('return', rid);
+      }, function (err) {
+        bad(); e.textContent = (err && err.message) || 'Could not save document.'; e.hidden = false;
+      });
+    };
+  } };
+};
+
+/* ---------- /return/doc/view/:docId ---------- */
+Screens['return/doc/view'] = function (param) {
+  var doc = (FG().documents || []).filter(function (d) { return d.id === param; })[0];
+  if (!doc) { setTimeout(function () { go('returns'); }, 0); return { html: '' }; }
+  var r = (FG().returns || []).filter(function (x) { return x.id === doc.returnId; })[0];
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← ' + esc(r ? r.number : 'RETURN') + '</button>' +
+    '<div class="step-head">' + esc(returnDocumentLabel(doc.type)) + '</div>' +
+    '<div class="card" style="text-align:center">' +
+    (doc.thumb ? '<img src="' + doc.thumb + '" style="max-width:100%">' : '<p class="hint">📷 No preview available.</p>') +
+    '</div>' +
+    '<div class="card">' +
+    '<div class="kv"><span>TYPE</span><b>' + esc(returnDocumentLabel(doc.type)) + '</b></div>' +
+    '<div class="kv"><span>SOURCE</span><b>' + esc(doc.source || 'RETURN DOCUMENT') + '</b></div>' +
+    '<div class="kv"><span>CAPTURED</span><b>' + fmtDT(doc.createdAt) + ' &middot; ' + esc(doc.createdBy || '') + '</b></div>' +
+    (doc.notes ? '<div class="kv"><span>NOTES</span><b>' + esc(doc.notes) + '</b></div>' : '') +
+    '<p class="hint">This is a return document — a photo record of return paperwork or condition. ' +
+    'It is never extracted as a History Card and never changes inventory balances.</p>' +
+    '</div></div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { if (r) go('return', r.id); else go('returns'); };
+  } };
+};
+
 /* Hub: NEEDS INVENTORY / ASSIGNED / COMPLETED + search + filters.
    Also honors assign-inventory?workOrder=XS024536 (query) and
    assign-inventory/wo/<id> (path) entry from a work order. */
@@ -5572,7 +6970,20 @@ Screens['assign-inventory/assign'] = function (param) {
         '<div id="ai-rollresult"></div></div>' +
         '<div class="label" style="margin:12px 0 8px">SEARCH ROLL</div>' +
         '<div class="field"><input class="input" id="ai-rollsearch" autocomplete="off" placeholder="Filter rolls&hellip;"></div>' +
-        '<div id="ai-rolllist">' + rollOpts + '</div>';
+        '<div id="ai-rolllist">' + rollOpts + '</div>' +
+        /* Run 8: available returned remnants are assignable inventory. */
+        '<div class="label" style="margin:16px 0 8px">🏷️ RETURNED REMNANTS (AVAILABLE)</div>' +
+        '<div id="ai-remnantlist">' + (function () {
+          var ms = availableReturnedRemnants();
+          if (!ms.length) return '<p class="hint">No available returned remnants.</p>';
+          return ms.map(function (m) {
+            return '<button class="rowbtn" data-remnantpick="' + esc(m.id) + '">' +
+              '<div class="rhead"><b class="mono">' + esc(m.number) + '</b> <span class="chip chip-green">AVAILABLE</span></div>' +
+              '<div class="sub">' + esc([m.style, m.color].filter(Boolean).join(' / ')) +
+              ' &middot; <b class="num">' + fmtLen(m.lengthIn) + '</b>' +
+              (m.locationCode ? ' &middot; loc <b class="mono">' + esc(m.locationCode) + '</b>' : '') + '</div></button>';
+          }).join('');
+        })() + '</div>';
     }
     function mountScan() {
       if (AI.discCode) {
@@ -5603,6 +7014,26 @@ Screens['assign-inventory/assign'] = function (param) {
       });
       Array.prototype.forEach.call(document.querySelectorAll('[data-rollpick]'), function (b) {
         b.onclick = function () { AI.rollId = b.getAttribute('data-rollpick'); AI.phase = 'roll'; renderBody(); };
+      });
+      /* Run 8: tapping a returned remnant shows its detail; it is available
+         inventory with its own REM-# identity. */
+      Array.prototype.forEach.call(document.querySelectorAll('[data-remnantpick]'), function (b) {
+        b.onclick = function () {
+          var m = (FG().returnedRemnants || []).filter(function (x) { return x.id === b.getAttribute('data-remnantpick'); })[0];
+          if (!m) return;
+          showConfirm({
+            title: 'Returned remnant ' + m.number,
+            body: '<div class="kv"><span>LENGTH</span><b>' + fmtLen(m.lengthIn) + '</b></div>' +
+              '<div class="kv"><span>MATERIAL</span><b>' + esc([m.style, m.color].filter(Boolean).join(' / ')) + '</b></div>' +
+              (m.locationCode ? '<div class="kv"><span>LOCATION</span><b>' + esc(m.locationCode) + '</b></div>' : '') +
+              '<p class="hint">This remnant is independently traceable inventory. ' +
+              'It can be assigned to a work order from the Returns hub.</p>',
+            confirm: 'VIEW IN RETURNS',
+            cancel: 'CLOSE'
+          }).then(function (ok) {
+            if (ok) go('returns');
+          });
+        };
       });
     }
     function onRollCode(code) {
@@ -5966,7 +7397,10 @@ function systemBalance(rollId) {
     return roll.sharedExpectedIn;
   var cuts = FG().cuts.filter(function (c) { return c.rollId === rollId; });
   var used = cuts.reduce(function (s, c) { return s + c.inches; }, 0);
-  return roll.beginningIn - used;
+  /* Run 8: approved restocks increase the balance (append-only). */
+  var restocked = (FG().restocks || []).filter(function (r) { return r.rollId === rollId; })
+    .reduce(function (s, r) { return s + (r.inches || r.quantityIn || 0); }, 0);
+  return roll.beginningIn - used + restocked;
 }
 function isTestBalance(roll) { return !!(roll && roll.testBalanceIn != null); }
 
@@ -6466,6 +7900,7 @@ Screens['rolls/search'] = function () {
     '<h1>Search rolls</h1>' +
     '<div class="field"><input class="input" id="q" autocomplete="off" placeholder="Roll #, style, color, location&hellip;"></div>' +
     '<div id="results"></div>' +
+    '<div id="return-results"></div>' +
     '</div>';
   return { html: html, mount: function () {
     var renderResults = function () {
@@ -6483,6 +7918,39 @@ Screens['rolls/search'] = function () {
       }).join('') : '<p class="hint center">No rolls match.</p>';
       Array.prototype.forEach.call(document.querySelectorAll('[data-roll]'), function (b) {
         b.onclick = function () { go('roll', b.getAttribute('data-roll')); };
+      });
+      /* Run 8: returns + remnants appear in search when the query matches. */
+      var rlist = (FG().returns || []).filter(function (r) {
+        if (!q) return false;
+        return (r.number + ' ' + (r.reason || '') + ' ' + (r.property || '') + ' ' + (r.account || ''))
+          .toLowerCase().indexOf(q) >= 0;
+      });
+      var mlist = (FG().returnedRemnants || []).filter(function (m) {
+        if (!q) return false;
+        return (m.number + ' ' + (m.style || '') + ' ' + (m.color || '')).toLowerCase().indexOf(q) >= 0;
+      });
+      var rh = '';
+      if (rlist.length) {
+        rh += '<div class="step-head" style="margin-top:12px">RETURNS</div>' + rlist.map(function (r) {
+          return '<button class="rowbtn" data-return="' + esc(r.id) + '">' +
+            '<div class="rhead"><b class="mono">' + esc(r.number) + '</b>' + statusChip(r.status) + '</div>' +
+            '<div class="sub">' + esc(r.reason || '') + '</div></button>';
+        }).join('');
+      }
+      if (mlist.length) {
+        rh += '<div class="step-head" style="margin-top:12px">RETURNED REMNANTS</div>' + mlist.map(function (m) {
+          return '<button class="rowbtn" data-remnant="' + esc(m.id) + '">' +
+            '<div class="rhead"><b class="mono">' + esc(m.number) + '</b></div>' +
+            '<div class="sub">' + esc(m.style || '') + ' &middot; ' + esc(m.color || '') +
+            ' &middot; ' + fmtLen(m.lengthIn) + '</div></button>';
+        }).join('');
+      }
+      $('#return-results').innerHTML = rh;
+      Array.prototype.forEach.call(document.querySelectorAll('[data-return]'), function (b) {
+        b.onclick = function () { go('return', b.getAttribute('data-return')); };
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-remnant]'), function (b) {
+        b.onclick = function () { go('returns'); };
       });
     };
     $('#q').addEventListener('input', renderResults);
@@ -7129,6 +8597,11 @@ function ledgerHtml(roll) {
   (FG().inventoryAssignments || []).forEach(function (a) {
     if (a.rollId === roll.id) ev.push({ kind: 'assign', at: a.at, a: a });
   });
+  /* Run 8: return activity touching this roll — restocks increase the balance,
+     remnant creation documents the split without touching the balance. */
+  (FG().returnActivity || []).forEach(function (ra) {
+    if (ra.rollId === roll.id) ev.push({ kind: 'return', at: ra.at, ra: ra });
+  });
   FG().counts.forEach(function (c) {
     if (c.rollId === roll.id) ev.push({ kind: 'count', at: c.at, rec: c });
   });
@@ -7229,6 +8702,17 @@ function ledgerHtml(roll) {
         '<div class="sub">' + esc(awo ? awo.property : '') + ' &middot; reserved <span class="num">' + fmtLen(as.reservedIn) + '</span>' +
         ' &middot; ' + fmtDT(as.at) + ' &middot; ' + esc(as.employee) + ' &middot; <span class="srcchip">FLOORGUARD</span></div></div>' +
         '<div class="bal"><div class="sub">Required</div><span class="num">' + fmtLen(as.requiredIn) + '</span></div></div>';
+    } else if (e.kind === 'return') {
+      /* Run 8: RETURN activity on this roll. A restock is the ONLY return
+         action that increases the balance; everything else is documentation. */
+      var ra = e.ra, rrt = (FG().returns || []).filter(function (x) { return x.id === ra.returnId; })[0];
+      var isRestock = ra.type === 'RETURN_RESTOCKED';
+      out += '<div class="ledger-row"><span class="dot" style="background:' + (isRestock ? 'var(--green)' : '#f0c36d') + '"></span>' +
+        '<div class="what"><b>' + esc(ra.type === 'RETURN_RESTOCKED' ? 'Return Restocked' : 'Return Activity') + '</b> ' +
+        (rrt ? '<span class="mono">' + esc(rrt.number) + '</span>' : '') +
+        '<div class="sub">' + esc(ra.detail || '') + '</div>' +
+        '<div class="sub">' + fmtDT(ra.at) + ' &middot; ' + esc(ra.by || '') + ' &middot; <span class="srcchip">RETURNS</span></div></div>' +
+        (isRestock ? '<div class="bal"><div class="sub">Balance +</div><span class="num">+' + fmtLen(ra.quantityIn || 0) + '</span></div>' : '<div class="bal"></div>') + '</div>';
     }
   });
   return out;
@@ -8422,10 +9906,12 @@ Screens['doc'] = function (param) {
   }).join('');
   var freshContinue = D && D.fresh && D.docId === doc.id && D.returnTo;
   var isReceiptDoc = doc.kind === 'RECEIPT_DOCUMENT';
+  var isReturnDoc = doc.kind === 'RETURN_DOCUMENT'; /* Run 8 */
   var rcpt = (!doc.rollId && doc.receiptId && typeof receiptById === 'function') ? receiptById(doc.receiptId) : null;
+  var rdoc = (!doc.rollId && !doc.receiptId && doc.returnId && typeof returnById === 'function') ? returnById(doc.returnId) : null;
   var html =
     '<div class="screen">' +
-    '<div class="step-head">' + (isReceiptDoc ? 'RECEIPT DOCUMENT' : 'ROLL DOCUMENT') + '</div>' +
+    '<div class="step-head">' + (isReceiptDoc ? 'RECEIPT DOCUMENT' : isReturnDoc ? 'RETURN DOCUMENT' : 'ROLL DOCUMENT') + '</div>' +
     '<h1 class="mono">' + esc(doc.docType) + (doc.num ? ' #' + doc.num : '') + '</h1>' +
     '<div class="card" style="text-align:center">' +
       '<img id="docimg" style="max-width:100%;border-radius:8px"' +
@@ -8436,7 +9922,9 @@ Screens['doc'] = function (param) {
     '<div class="card">' +
       (doc.rollId
         ? '<div class="kv"><span class="k">Roll</span><span class="v mono">' + esc(doc.rollId) + '</span></div>'
-        : '<div class="kv"><span class="k">Receipt</span><span class="v mono">' + esc((rcpt && rcpt.number) || doc.receiptId || '&mdash;') + '</span></div>') +
+        : isReturnDoc
+          ? '<div class="kv"><span class="k">Return</span><span class="v mono">' + esc((rdoc && rdoc.number) || doc.returnId || '&mdash;') + '</span></div>'
+          : '<div class="kv"><span class="k">Receipt</span><span class="v mono">' + esc((rcpt && rcpt.number) || doc.receiptId || '&mdash;') + '</span></div>') +
       '<div class="kv"><span class="k">Document Type</span><span class="v">' + esc(doc.docType) + '</span></div>' +
       '<div class="kv"><span class="k">Captured</span><span class="v">' + esc(doc.date) + ' &middot; ' + esc(doc.time) + '</span></div>' +
       '<div class="kv"><span class="k">Employee</span><span class="v">' + esc(doc.employee) + '</span></div>' +
@@ -8444,7 +9932,7 @@ Screens['doc'] = function (param) {
       '<div class="kv"><span class="k">Source</span><span class="v"><span class="srcchip">PAPER CARD</span></span></div>' +
     '</div>' +
     imports +
-    (isReceiptDoc ? '' :
+    (isReceiptDoc || isReturnDoc ? '' :
       '<button class="btn btn-huge" id="extract">&#10024; EXTRACT HISTORY FROM CARD</button>') +
     (freshContinue
       ? '<button class="btn btn-primary btn-huge" id="doccontinue">CONTINUE &rarr;</button>'

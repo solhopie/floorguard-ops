@@ -95,7 +95,7 @@ function sharedConfig(D, base) {
 async function main() {
   /* ================= A. schema 4 + migration ================= */
   var S = makeDevice();
-  ok(S.DB.data.schema === 6, 'seed schema is 6');
+  ok(S.DB.data.schema === 7, 'seed schema is 7');
   var oldWO = { id: 'OLD1', number: 'OLD1', opStatus: 'OPEN' };
   var fg3 = S.seedFloorguard();
   fg3.workOrders.push(oldWO);
@@ -112,7 +112,7 @@ async function main() {
       evBefore = (fg3.assignmentEvents || []).length;
   S.localStorage.setItem(S.DB.KEY, JSON.stringify(v3));
   S.DB.load();
-  ok(S.DB.data.schema === 6, 'schema 3 migrates to 6');
+  ok(S.DB.data.schema === 7, 'schema 3 migrates to 7');
   var mig = S.woById('OLD1');
   ok(mig && mig.priority === 'NORMAL' && mig.scheduledDate === null && mig.onHold === false &&
     mig.warehouseCompletedAt === null, 'migration adds scheduling defaults to old work orders');

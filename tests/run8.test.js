@@ -1,0 +1,380 @@
+/* FloorGuard Ops — Run 8 returns + disposition assertions.
+   Run: node tests/run8.test.js
+   Covers: schema-7 migration, local return numbering (RET-/REM-),
+   idempotency, role gating (employee/supervisor/manager), offline
+   fail-fast, restock balance changes + version increments + stale-version
+   rejection, remnant parent-balance preservation, quarantine assignment
+   exclusion, scrap/vendor manager restriction, return documents, shared
+   two-device flows through the PostgREST double (backend numbering,
+   idempotent retries, server-side authorization via simulated roles,
+   stale roll versions, multi-device sync), and integrations
+   (WO/SO/loadout linkage, roll ledger, dashboard).
+   Same vm-sandbox trick as the earlier suites. */
+var fs = require('fs');
+var path = require('path');
+var vm = require('vm');
+var dbl = require('./postgrest-double.js');
+
+var passed = 0, failed = 0;
+function ok(cond, name) {
+  if (cond) { passed++; }
+  else { failed++; console.error('FAIL:', name); }
+}
+function makeEl(id) {
+  return {
+    _id: id, innerHTML: '', textContent: '', value: '', hidden: false, className: '',
+    onclick: null, onsubmit: null, oninput: null, style: {},
+    classList: { add: function () {}, remove: function () {}, toggle: function () {} },
+    addEventListener: function () {}, appendChild: function () {}, setAttribute: function () {},
+    getAttribute: function () { return null; },
+    querySelector: function () { return makeEl(id + ':q'); },
+    querySelectorAll: function () { return []; },
+    focus: function () {}, click: function () { if (this.onclick) this.onclick(); },
+    remove: function () {}, scrollIntoView: function () {}
+  };
+}
+function makeDevice() {
+  var store = {};
+  var els = {};
+  function elFor(id) { return els[id] || (els[id] = makeEl(id)); }
+  var nav = { vibrate: function () {}, onLine: true };
+  var sandbox = {
+    console: console, setTimeout: setTimeout, clearTimeout: clearTimeout,
+    Buffer: Buffer, fetch: fetch,
+    localStorage: {
+      getItem: function (k) { return (k in store) ? store[k] : null; },
+      setItem: function (k, v) { store[k] = String(v); },
+      removeItem: function (k) { delete store[k]; }
+    },
+    document: {
+      addEventListener: function () {},
+      getElementById: function (id) { return elFor(id); },
+      querySelector: function (sel) {
+        var m = /^#([\w-]+)$/.exec(sel || '');
+        return m ? elFor(m[1]) : makeEl('anon');
+      },
+      querySelectorAll: function () { return []; },
+      createElement: function () { return makeEl('created'); },
+      body: makeEl('body')
+    },
+    window: { addEventListener: function () {}, scrollTo: function () {}, location: { hash: '' } },
+    navigator: nav
+  };
+  vm.createContext(sandbox);
+  var appSrc = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+  var bootIdx = appSrc.lastIndexOf('/* ---------------- boot');
+  vm.runInContext(appSrc.slice(0, bootIdx), sandbox, { filename: 'app.js' });
+  var repoSrc = fs.readFileSync(path.join(__dirname, '..', 'repository.js'), 'utf8');
+  vm.runInContext(repoSrc, sandbox, { filename: 'repository.js' });
+  sandbox.DB.reset();
+  sandbox.DB.data.currentEmployee = 'Marcus';
+  sandbox._nav = nav;
+  return sandbox;
+}
+function sharedConfig(D, base) {
+  D.Repository.saveConfig({
+    dataProvider: 'shared', supabaseUrl: base,
+    supabaseAnonKey: 'test-anon-key', warehouseId: 'main'
+  });
+}
+function setRole(D, role) {
+  D.DB.data.employeeRoles = D.DB.data.employeeRoles || {};
+  D.DB.data.employeeRoles[D.DB.data.currentEmployee] = role;
+}
+async function rejectsCode(p, code) {
+  try { await p; } catch (e) { return e && e.code === code; }
+  return false;
+}
+async function rejectsLocal(fn, err) {
+  try { var r = fn(); } catch (e) { return e && e.message === err; }
+  return r && r.ok === false && (r.err === err || r.error === err);
+}
+
+async function main() {
+  /* ================= A. schema 7 + migration ================= */
+  var S = makeDevice();
+  ok(S.DB.data.schema === 7, 'seed schema is 7');
+  ok(Array.isArray(S.FG().returns) && Array.isArray(S.FG().returnItems) &&
+     Array.isArray(S.FG().returnDispositions) && Array.isArray(S.FG().returnedRemnants) &&
+     Array.isArray(S.FG().returnExceptions),
+    'seed carries return collections');
+  ok(S.FG().seq.return >= 100001 && S.FG().seq.remnant >= 100001,
+    'seed seeds return/remnant counters at 100001');
+  /* v6 -> v7 migration path */
+  var M = makeDevice();
+  var mfg = M.FG();
+  delete mfg.returns; delete mfg.returnItems; delete mfg.returnDispositions;
+  delete mfg.returnedRemnants; delete mfg.returnExceptions;
+  mfg.seq.return = 0; mfg.seq.remnant = 0;
+  M.migrateFloorguardV6toV7();
+  ok(Array.isArray(mfg.returns) && Array.isArray(mfg.returnedRemnants) &&
+     mfg.seq.return >= 100001 && mfg.seq.remnant >= 100001,
+    'v6->v7 migration creates collections and reseeds counters above fixtures');
+
+  /* ================= B. local numbering + idempotency ================= */
+  var N = makeDevice();
+  setRole(N, 'SUPERVISOR');
+  var r1 = N.createReturnLocal({ reason: 'DEFECTIVE', requestKey: 'rk-1' });
+  var r1dup = N.createReturnLocal({ reason: 'DEFECTIVE', requestKey: 'rk-1' });
+  ok(r1.ok && /^RET-100001$/.test(r1.return.number), 'first return is RET-100001: ' + (r1.return && r1.return.number));
+  ok(r1dup.ok && r1dup.duplicate && r1dup.return.id === r1.return.id,
+    'retry with same request key returns the original (idempotent)');
+  var r2 = N.createReturnLocal({ reason: 'WRONG_ITEM', requestKey: 'rk-2' });
+  ok(r2.ok && r2.return.number === 'RET-100002', 'second return is RET-100002');
+
+  /* ================= C. local role gating ================= */
+  var E = makeDevice();
+  setRole(E, 'WAREHOUSE_EMPLOYEE');
+  var er = E.createReturnLocal({ reason: 'DEFECTIVE', requestKey: 'erk-1' });
+  ok(er.ok, 'employee can create a return');
+  var eit = E.addReturnItemLocal(er.return.id, { materialType: 'CARPET', requestKey: 'eik-1' });
+  ok(eit.ok, 'employee can add a return item');
+  var eme = E.measureReturnItemLocal(eit.item.id, 138, { requestKey: 'emk-1' });
+  ok(eme.ok, 'employee can measure a return item');
+  var ein = E.inspectReturnItemLocal(eit.item.id, 'GOOD', {});
+  ok(ein.ok, 'employee can inspect a return item');
+  var erstock = await rejectsLocal(function () {
+    return E.approveRestockLocal(eit.item.id, { rollId: '16628697' });
+  }, 'RESTOCK APPROVAL REQUIRES A SUPERVISOR OR ABOVE');
+  ok(erstock, 'employee restock approval is rejected (supervisor+)');
+  var escrap = await rejectsLocal(function () {
+    return E.scrapReturnItemLocal(eit.item.id, {});
+  }, 'SCRAP AUTHORIZATION REQUIRES A MANAGER OR ADMIN');
+  ok(escrap, 'employee scrap is rejected (manager+)');
+
+  /* ================= D. local restock: balance + version ================= */
+  var V = makeDevice();
+  setRole(V, 'SUPERVISOR');
+  var vr = V.createReturnLocal({ reason: 'OVERAGE', workOrderId: 'XS024536', requestKey: 'vrk-1' });
+  var vit = V.addReturnItemLocal(vr.return.id, { materialType: 'CARPET', rollId: '16628697', requestKey: 'vik-1' });
+  V.measureReturnItemLocal(vit.item.id, 138, { requestKey: 'vmk-1' });
+  V.inspectReturnItemLocal(vit.item.id, 'GOOD', {});
+  var rollBefore = V.rollById('16628697');
+  var balBefore = V.systemBalance('16628697');
+  var verBefore = rollBefore.version || 1;
+  var rs = V.approveRestockLocal(vit.item.id, { rollId: '16628697', requestKey: 'vrsk-1' });
+  ok(rs.ok && !rs.duplicate, 'supervisor restock succeeds');
+  var balAfter = V.systemBalance('16628697');
+  ok(balAfter === balBefore + 138, 'restock increases balance by measured inches: ' + balBefore + ' -> ' + balAfter);
+  ok(V.rollById('16628697').version === verBefore + 1, 'restock increments roll version');
+  ok(rs.newBalanceIn === balAfter, 'restock result carries the new balance');
+  /* idempotent retry */
+  var rsdup = V.approveRestockLocal(vit.item.id, { rollId: '16628697', requestKey: 'vrsk-1' });
+  ok(rsdup.ok && rsdup.duplicate && V.systemBalance('16628697') === balAfter,
+    'restock retry is idempotent (no double-apply)');
+  /* stale version */
+  var vr2 = V.createReturnLocal({ reason: 'OVERAGE', requestKey: 'vrk-2' });
+  var vit2 = V.addReturnItemLocal(vr2.return.id, { rollId: '16628697', requestKey: 'vik-2' });
+  V.measureReturnItemLocal(vit2.item.id, 50, {});
+  V.inspectReturnItemLocal(vit2.item.id, 'GOOD', {});
+  var stale = await rejectsLocal(function () {
+    return V.approveRestockLocal(vit2.item.id, { rollId: '16628697', rollVersion: verBefore, requestKey: 'vrsk-2' });
+  }, 'ROLL_VERSION_CONFLICT');
+  ok(stale, 'stale roll version is rejected');
+
+  /* ================= E. local remnant: independent identity ================= */
+  var Q = makeDevice();
+  setRole(Q, 'SUPERVISOR');
+  var qr = Q.createReturnLocal({ reason: 'DAMAGED', requestKey: 'qrk-1' });
+  var qit = Q.addReturnItemLocal(qr.return.id, { rollId: '16628697', requestKey: 'qik-1' });
+  Q.measureReturnItemLocal(qit.item.id, 60, {});
+  Q.inspectReturnItemLocal(qit.item.id, 'DAMAGED', {});
+  var qbalBefore = Q.systemBalance('16628697');
+  var qm = Q.createReturnedRemnantLocal(qit.item.id, { lengthIn: 60, requestKey: 'qmk-1' });
+  ok(qm.ok && /^REM-100001$/.test(qm.remnant.number), 'first remnant is REM-100001: ' + (qm.remnant && qm.remnant.number));
+  ok(Q.systemBalance('16628697') === qbalBefore, 'remnant creation does NOT change parent balance');
+  ok(qm.remnant.parentRollId === '16628697' && qm.remnant.status === 'AVAILABLE',
+    'remnant links parent roll and is AVAILABLE');
+  var qavail = Q.availableReturnedRemnants();
+  ok(qavail.length === 1 && qavail[0].id === qm.remnant.id, 'remnant appears in available inventory');
+  /* damaged condition cannot restock into trusted roll */
+  var qr2 = Q.createReturnLocal({ reason: 'DAMAGED', requestKey: 'qrk-2' });
+  var qit2 = Q.addReturnItemLocal(qr2.return.id, { rollId: '16628697', requestKey: 'qik-2' });
+  Q.measureReturnItemLocal(qit2.item.id, 40, {});
+  Q.inspectReturnItemLocal(qit2.item.id, 'DAMAGED', {});
+  var qbad = await rejectsLocal(function () {
+    return Q.approveRestockLocal(qit2.item.id, { rollId: '16628697', requestKey: 'qmk-9' });
+  }, 'CONDITION NOT RESTOCKABLE');
+  ok(qbad, 'damaged material cannot merge into a trusted roll');
+
+  /* ================= E2. submit transitions to READY_FOR_DISPOSITION ================= */
+  var SR = makeDevice();
+  var srr = SR.createReturnLocal({ reason: 'OVERAGE', requestKey: 'srrk-1' });
+  var srit = SR.addReturnItemLocal(srr.return.id, { requestKey: 'srrik-1' });
+  SR.measureReturnItemLocal(srit.item.id, 50, {});
+  SR.inspectReturnItemLocal(srit.item.id, 'GOOD', {});
+  var srsub = SR.submitReturnLocal(srr.return.id);
+  ok(srsub.ok && srsub.return.status === 'READY_FOR_DISPOSITION', 'submit moves return to READY_FOR_DISPOSITION');
+
+  /* ================= F. quarantine excludes from assignment ================= */
+  var W = makeDevice();
+  setRole(W, 'SUPERVISOR');
+  var wr = W.createReturnLocal({ reason: 'DEFECTIVE', requestKey: 'wrk-1' });
+  var wit = W.addReturnItemLocal(wr.return.id, { rollId: '16628697', requestKey: 'wik-1' });
+  W.inspectReturnItemLocal(wit.item.id, 'DEFECTIVE', {});
+  var wq = W.quarantineReturnItemLocal(wit.item.id, { reason: 'suspected water damage', requestKey: 'wqk-1' });
+  ok(wq.ok && wq.holding && wq.holding.status === 'QUARANTINED', 'quarantine creates a QUARANTINED holding');
+  var wavail = W.availableReturnedRemnants();
+  ok(wavail.length === 0, 'quarantined material is not available for assignment');
+
+  /* ================= G. scrap/vendor need manager ================= */
+  var G = makeDevice();
+  setRole(G, 'SUPERVISOR');
+  var gr = G.createReturnLocal({ reason: 'DEFECTIVE', requestKey: 'grk-1' });
+  var git = G.addReturnItemLocal(gr.return.id, { rollId: '16628697', requestKey: 'gik-1' });
+  G.inspectReturnItemLocal(git.item.id, 'DEFECTIVE', {});
+  var gscrap = await rejectsLocal(function () { return G.scrapReturnItemLocal(git.item.id, {}); }, 'SCRAP AUTHORIZATION REQUIRES A MANAGER OR ADMIN');
+  ok(gscrap, 'supervisor scrap is rejected (manager+)');
+  setRole(G, 'MANAGER');
+  var gscrap2 = G.scrapReturnItemLocal(git.item.id, { reason: 'beyond repair', requestKey: 'gsk-1' });
+  ok(gscrap2.ok, 'manager scrap succeeds');
+  var git2 = G.addReturnItemLocal(gr.return.id, { rollId: '16628697', requestKey: 'gik-2' });
+  G.inspectReturnItemLocal(git2.item.id, 'DEFECTIVE', {});
+  var gvend = G.sendReturnToVendorLocal(git2.item.id, { supplier: 'Acme', requestKey: 'gvk-1' });
+  ok(gvend.ok, 'manager vendor return succeeds');
+
+  /* ================= H. return documents ================= */
+  var D = makeDevice();
+  setRole(D, 'WAREHOUSE_EMPLOYEE');
+  var dr = D.createReturnLocal({ reason: 'OTHER', notes: 'customer changed mind', requestKey: 'drk-1' });
+  var tinyImg = 'data:image/jpeg;base64,/9j/4AAQSkZJRg==';
+  var ddoc = await D.Repository.uploadReturnDocument({ returnId: dr.return.id,
+    imageDataUrl: tinyImg, thumbDataUrl: tinyImg, employee: 'Marcus' });
+  ok(ddoc.ok && ddoc.doc.returnId === dr.return.id && ddoc.doc.kind === 'RETURN_DOCUMENT',
+    'local return document links returnId');
+  var ddocs = await D.Repository.getDocumentsForReturn(dr.return.id);
+  ok(ddocs.length >= 1 && ddocs[0].returnId === dr.return.id,
+    'local getDocumentsForReturn returns the captured document');
+
+  /* ================= I. shared: numbering + idempotency + auth ================= */
+  var harness = dbl.startDouble();
+  var base = await harness.start();
+  var A = makeDevice(); sharedConfig(A, base);
+  var B = makeDevice(); sharedConfig(B, base);
+  A.DB.data.currentEmployee = 'alice@warehouse.com';
+  B.DB.data.currentEmployee = 'bob@warehouse.com';
+  await A.Repository.signIn('alice@warehouse.com', 'pw');
+  await B.Repository.signIn('bob@warehouse.com', 'pw');
+  /* server-side roles in the double */
+  harness.setRole('alice@warehouse.com', 'SUPERVISOR');
+  harness.setRole('bob@warehouse.com', 'WAREHOUSE_EMPLOYEE');
+  setRole(A, 'SUPERVISOR');
+  setRole(B, 'WAREHOUSE_EMPLOYEE');
+
+  var sa = await A.Repository.createReturn({ reason: 'OVERAGE', requestKey: 'shk-1' });
+  ok(sa.ok && /^RET-100001$/.test(sa.return.number), 'shared first return is RET-100001');
+  var saDup = await A.Repository.createReturn({ reason: 'OVERAGE', requestKey: 'shk-1' });
+  ok(saDup.ok && saDup.duplicate && saDup.return.id === sa.return.id,
+    'shared create retry is idempotent');
+  var sb = await B.Repository.createReturn({ reason: 'DEFECTIVE', requestKey: 'shk-2' });
+  ok(sb.ok && sb.return.number === 'RET-100002', 'second device gets RET-100002 (central numbering)');
+
+  /* employee adds/measures/inspects on device B */
+  var sbi = await B.Repository.addReturnItem(sb.return.id, { materialType: 'CARPET', requestKey: 'shik-1' });
+  ok(sbi.ok, 'shared add item (employee)');
+  await B.Repository.measureReturnItem(sbi.item.id, 100);
+  await B.Repository.inspectReturnItem(sbi.item.id, 'GOOD');
+  /* B needs a roll to restock into — use the shared roll from fixtures */
+  await B.Repository.refresh();
+  var sroll = (B.FG().rolls || [])[0];
+  ok(!!sroll, 'shared device has rolls after refresh');
+  /* employee restock must fail on the SERVER (double enforces role).
+     Temporarily lift the client-side gate so the request reaches the server. */
+  setRole(B, 'SUPERVISOR');
+  var empRestockDenied = await rejectsCode(
+    B.Repository.approveRestock(sbi.item.id, { rollId: sroll.id, requestKey: 'shrk-1' }), 'NOT_AUTHORIZED');
+  setRole(B, 'WAREHOUSE_EMPLOYEE');
+  ok(empRestockDenied, 'server rejects employee restock with NOT_AUTHORIZED');
+  /* supervisor restock succeeds; balance changes; version increments */
+  await A.Repository.refresh();
+  var aroll = A.FG().rolls.filter(function (r) { return r.id === sroll.id; })[0];
+  var abalBefore = A.systemBalance(aroll.id);
+  var averBefore = aroll.sharedVersion || aroll.version || 1;
+  /* A must see the item B created */
+  var srest = await A.Repository.approveRestock(sbi.item.id, { rollId: aroll.id, requestKey: 'shrk-2' });
+  ok(srest.ok, 'supervisor restock succeeds on shared backend');
+  await A.Repository.refresh();
+  var aroll2 = A.FG().rolls.filter(function (r) { return r.id === sroll.id; })[0];
+  ok(A.systemBalance(aroll.id) === abalBefore + 100, 'shared restock increases balance by 100');
+  ok((aroll2.sharedVersion || aroll2.version) === averBefore + 1, 'shared restock increments roll version');
+  /* stale version rejected */
+  var sb2 = await B.Repository.createReturn({ reason: 'OVERAGE', requestKey: 'shk-3' });
+  var sbi2 = await B.Repository.addReturnItem(sb2.return.id, { requestKey: 'shik-2' });
+  await B.Repository.measureReturnItem(sbi2.item.id, 50);
+  await B.Repository.inspectReturnItem(sbi2.item.id, 'GOOD');
+  var staleShared = await rejectsCode(
+    A.Repository.approveRestock(sbi2.item.id, { rollId: aroll.id, rollVersion: averBefore, requestKey: 'shrk-3' }),
+    'ROLL_VERSION_CONFLICT');
+  ok(staleShared, 'shared stale roll version is rejected');
+  /* idempotent retry does not double-apply */
+  var rdup = await A.Repository.approveRestock(sbi.item.id, { rollId: aroll.id, requestKey: 'shrk-2' });
+  await A.Repository.refresh();
+  ok(rdup.ok && rdup.duplicate && A.systemBalance(aroll.id) === abalBefore + 100,
+    'shared restock retry is idempotent');
+
+  /* ================= J. shared: remnant + quarantine + scrap/vendor ================= */
+  var sc = await A.Repository.createReturn({ reason: 'DAMAGED', requestKey: 'shk-4' });
+  var sci = await A.Repository.addReturnItem(sc.return.id, { rollId: aroll.id, requestKey: 'shik-3' });
+  await A.Repository.measureReturnItem(sci.item.id, 60);
+  await A.Repository.inspectReturnItem(sci.item.id, 'DAMAGED');
+  await A.Repository.refresh();
+  var cbalBefore = A.systemBalance(aroll.id);
+  var srem = await A.Repository.createReturnedRemnant(sci.item.id, { lengthIn: 60, requestKey: 'shmk-2' });
+  ok(srem.ok && srem.remnant && /^REM-100001$/.test(srem.remnant.number), 'shared first remnant is REM-100001');
+  await A.Repository.refresh();
+  ok(A.systemBalance(aroll.id) === cbalBefore, 'shared remnant does not change parent balance');
+  /* manager-only: supervisor scrap/vendor denied by server.
+     Lift client gate so the request reaches the server. */
+  var sci2 = await A.Repository.addReturnItem(sc.return.id, { requestKey: 'shik-4' });
+  await A.Repository.inspectReturnItem(sci2.item.id, 'DEFECTIVE');
+  setRole(A, 'MANAGER');
+  var supScrapDenied = await rejectsCode(A.Repository.scrapReturnItem(sci2.item.id, { reason: 'test' }), 'NOT_AUTHORIZED');
+  setRole(A, 'SUPERVISOR');
+  ok(supScrapDenied, 'server rejects supervisor scrap with NOT_AUTHORIZED');
+  setRole(A, 'MANAGER');
+  var supVendDenied = await rejectsCode(A.Repository.sendReturnToVendor(sci2.item.id, { supplier: 'Acme' }), 'NOT_AUTHORIZED');
+  setRole(A, 'SUPERVISOR');
+  ok(supVendDenied, 'server rejects supervisor vendor return with NOT_AUTHORIZED');
+  /* promote alice to manager in the double and retry */
+  harness.setRole('alice@warehouse.com', 'MANAGER');
+  setRole(A, 'MANAGER');
+  var mscrap = await A.Repository.scrapReturnItem(sci2.item.id, { reason: 'test scrap', requestKey: 'shsk-1' });
+  ok(mscrap.ok, 'manager scrap succeeds on shared backend');
+
+  /* ================= K. shared: offline fail-fast ================= */
+  A._nav.onLine = false;
+  var off1 = false, off2 = false;
+  try { await A.Repository.createReturn({ reason: 'OVERAGE' }); } catch (e) { off1 = e && e.code === 'OFFLINE'; }
+  try { await A.Repository.approveRestock(sci.item.id, { rollId: aroll.id }); } catch (e) { off2 = e && e.code === 'OFFLINE'; }
+  ok(off1 && off2, 'offline return mutations fail fast');
+  A._nav.onLine = true;
+
+  /* ================= L. shared: documents + multi-device visibility ================= */
+  var sdoc = await A.Repository.uploadReturnDocument({ returnId: sc.return.id,
+    imageDataUrl: tinyImg, employee: 'alice@warehouse.com' });
+  ok(sdoc.ok && sdoc.doc.returnId === sc.return.id, 'shared return document uploads');
+  await B.Repository.refresh();
+  var bdocs = await B.Repository.getDocumentsForReturn(sc.return.id);
+  ok(bdocs.length >= 1, 'return document visible on second device');
+
+  /* ================= M. integrations ================= */
+  var Z = makeDevice();
+  setRole(Z, 'SUPERVISOR');
+  var zr = Z.createReturnLocal({ reason: 'OVERAGE', workOrderId: 'XS024536', salesOrderId: 'SO-100245', loadoutId: 'LOAD-100001', requestKey: 'zrk-1' });
+  ok(zr.ok, 'return links WO/SO/loadout');
+  var woRets = (Z.FG().returns || []).filter(function (x) { return x.workOrderId === 'XS024536'; });
+  ok(woRets.length === 1 && woRets[0].id === zr.return.id, 'WO-linked return is queryable');
+  var dashPending = Z.returnsByTab('PENDING');
+  ok(dashPending.length >= 1, 'dashboard PENDING tab includes the new return');
+  var zit = Z.addReturnItemLocal(zr.return.id, { rollId: '16628697', requestKey: 'zik-1' });
+  Z.measureReturnItemLocal(zit.item.id, 25, {});
+  Z.inspectReturnItemLocal(zit.item.id, 'GOOD', {});
+  Z.approveRestockLocal(zit.item.id, { rollId: '16628697', requestKey: 'zsk-1' });
+  var ledgerActs = (Z.FG().returnActivity || []).filter(function (a) { return a.rollId === '16628697'; });
+  ok(ledgerActs.length >= 1, 'restock writes roll-ledger return activity');
+
+  await harness.close();
+  console.log('run8: ' + passed + ' passed, ' + failed + ' failed');
+  process.exit(failed ? 1 : 0);
+}
+main().catch(function (e) { console.error('HARNESS ERROR', e); process.exit(1); });

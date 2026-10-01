@@ -19,11 +19,15 @@ var TABLES = [
   /* Run 7: central numbering + loadout + receipts. */
   'business_number_counters', 'number_issues',
   'loadouts', 'loadout_lines', 'loadout_exceptions',
-  'receipts', 'receipt_lines', 'receipt_exceptions'
+  'receipts', 'receipt_lines', 'receipt_exceptions',
+  /* Run 8: returns + returned material disposition. */
+  'returns', 'return_items', 'return_dispositions',
+  'returned_remnants', 'return_exceptions'
 ];
 
 var NUMBER_SEED = { ORD: ['ORD-', 100001], SO: ['SO-', 100001], WO: ['WO-', 200001],
-                    RCV: ['RCV-', 100001], LOAD: ['LOAD-', 100001] };
+                    RCV: ['RCV-', 100001], LOAD: ['LOAD-', 100001],
+                    RET: ['RET-', 100001], REM: ['REM-', 100001] };
 
 function startDouble() {
   var seq = 1000;
@@ -78,6 +82,23 @@ function startDouble() {
     var h = req.headers['authorization'] || '';
     var tok = h.replace(/^Bearer\s+/, '');
     return !!state.sessions[tok];
+  }
+  /* Run 8: server-side role for the simulated backend. The test harness sets
+     the role per session via setRole(email, role); defaults to
+     WAREHOUSE_EMPLOYEE (the least privilege). */
+  function roleOf(req) {
+    var h = req.headers['authorization'] || '';
+    var tok = h.replace(/^Bearer\s+/, '');
+    var s = state.sessions[tok];
+    return (s && s.role) || 'WAREHOUSE_EMPLOYEE';
+  }
+  function requireRole(role, minRoles) {
+    /* minRoles: array of roles that satisfy the requirement, in ascending order.
+       Role hierarchy: WAREHOUSE_EMPLOYEE < SUPERVISOR < MANAGER < ADMIN */
+    var order = ['WAREHOUSE_EMPLOYEE', 'SUPERVISOR', 'MANAGER', 'ADMIN'];
+    var ri = order.indexOf(role);
+    var ok = minRoles.some(function (m) { return ri >= order.indexOf(m); });
+    return ok ? null : errObj('NOT_AUTHORIZED', 'Not authorized for this action.');
   }
   function readBody(req) {
     return new Promise(function (resolve) {
@@ -578,6 +599,379 @@ function rpcCompleteReceipt(b) {
   return { ok: true, duplicate: false };
 }
 
+/* ---- Run 8: returns + returned material disposition ----
+   Mirrors the SQL contract in supabase/migrations/0009_returns.sql:
+   idempotent creates, version-checked restock, condition-gated dispositions,
+   audit rows with entity_type 'return'. Role gates live server-side in the
+   real backend; the double enforces the data contract. */
+var RESTOCKABLE = ['NEW_UNUSED', 'GOOD', 'OPENED', 'CUT_REMNANT'];
+function rpcCreateReturn(b, role) {
+  var rs = state.tables.returns;
+  var now = new Date().toISOString();
+  if (b.p_request_key) {
+    var byKey = Array.from(rs.values()).filter(function (r) { return r.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, return_id: byKey.id, return_number: byKey.return_number };
+  }
+  var num = issueNum('RET', 'ret-num:' + b.p_id);
+  var r = { id: b.p_id, return_number: num, warehouse_id: b.p_warehouse_id || 'main',
+    work_order_id: b.p_work_order_id || null, sales_order_id: b.p_sales_order_id || null,
+    loadout_id: b.p_loadout_id || null, property: b.p_property || null, account: b.p_account || null,
+    source_kind: b.p_source_kind || 'MANUAL', reason: b.p_reason || 'OTHER',
+    status: 'PENDING', notes: b.p_notes || null,
+    created_by: b.p_employee || null, received_by: null,
+    created_at: now, received_at: null, completed_at: null, updated_at: now,
+    client_request_key: b.p_request_key || null };
+  rs.set(r.id, r);
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: r.warehouse_id,
+    action: 'RETURN_CREATED', entity_type: 'return', entity_id: r.id,
+    user_name: b.p_employee || null, created_at: now });
+  return { ok: true, duplicate: false, return_id: r.id, return_number: num };
+}
+function rpcReceiveReturn(b, role) {
+  var r = state.tables.returns.get(b.p_return_id);
+  if (!r) return errObj('RETURN_NOT_FOUND', 'Return does not exist.');
+  if (r.status === 'COMPLETED') return errObj('RETURN_COMPLETED', 'Return is completed.');
+  if (r.status === 'CANCELLED') return errObj('RETURN_CANCELLED', 'Return is cancelled.');
+  if (r.status !== 'PENDING') return { ok: true, duplicate: true, return_id: r.id };
+  var now = new Date().toISOString();
+  r.status = 'RECEIVED'; r.received_by = b.p_employee || null; r.received_at = now; r.updated_at = now;
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: r.warehouse_id,
+    action: 'RETURN_RECEIVED', entity_type: 'return', entity_id: r.id,
+    user_name: b.p_employee || null, created_at: now });
+  return { ok: true, duplicate: false, return_id: r.id };
+}
+function rpcSubmitReturn(b, role) {
+  var rs = state.tables.returns, is = state.tables.return_items;
+  var now = new Date().toISOString();
+  var r = rs.get(b.p_return_id);
+  if (!r) return errObj('RETURN_NOT_FOUND', 'Return does not exist.');
+  if (r.status === 'READY_FOR_DISPOSITION')
+    return { ok: true, duplicate: true, return_id: r.id };
+  if (r.status !== 'PENDING')
+    return errObj('INVALID_STATUS', 'Only pending returns can be submitted.');
+  var items = Array.from(is.values()).filter(function (x) { return x.return_id === r.id; });
+  if (!items.length) return errObj('NO_ITEMS', 'Add at least one returned item.');
+  var bad = items.filter(function (x) {
+    return x.status !== 'INSPECTED' && x.status !== 'MEASURED';
+  });
+  if (bad.length) return errObj('ITEMS_NOT_INSPECTED', bad.length + ' item(s) still need inspection.');
+  r.status = 'READY_FOR_DISPOSITION'; r.updated_at = now;
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: r.warehouse_id,
+    action: 'RETURN_SUBMITTED', entity_type: 'return', entity_id: r.id,
+    user_name: b.p_employee || null, created_at: now,
+    new_value: { detail: items.length + ' item(s) submitted for disposition.' } });
+  return { ok: true, duplicate: false, return_id: r.id };
+}
+function rpcAddReturnItem(b, role) {
+  var rs = state.tables.returns, is = state.tables.return_items;
+  var now = new Date().toISOString();
+  var r = rs.get(b.p_return_id);
+  if (!r) return errObj('RETURN_NOT_FOUND', 'Return does not exist.');
+  if (r.status === 'COMPLETED' || r.status === 'CANCELLED')
+    return errObj('RETURN_CLOSED', 'Return is ' + r.status + '.');
+  if (b.p_request_key) {
+    var byKey = Array.from(is.values()).filter(function (x) { return x.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, item_id: byKey.id };
+  }
+  var it = { id: b.p_id, return_id: r.id, warehouse_id: r.warehouse_id,
+    material_type: b.p_material_type || 'CARPET', product_id: b.p_product_id || null,
+    roll_id: b.p_roll_id || null,
+    source_inventory_assignment_id: b.p_source_inventory_assignment_id || null,
+    source_loadout_line_id: b.p_source_loadout_line_id || null,
+    style: b.p_style || null, color: b.p_color || null, width_in: b.p_width_in || null,
+    uom: b.p_uom || 'IN', returned_quantity_in: b.p_returned_quantity || null,
+    measured_in: null, measured_by: null, measured_at: null,
+    condition: null, disposition: null, status: 'PENDING',
+    location_code: b.p_location_code || null, notes: b.p_notes || null,
+    created_at: now, updated_at: now, client_request_key: b.p_request_key || null };
+  is.set(it.id, it);
+  return { ok: true, duplicate: false, item_id: it.id };
+}
+function rpcMeasureReturnItem(b, role) {
+  var it = state.tables.return_items.get(b.p_item_id);
+  if (!it) return errObj('RETURN_ITEM_NOT_FOUND', 'Return item does not exist.');
+  if (it.status === 'DISPOSITION_COMPLETE')
+    return errObj('ALREADY_DISPOSITIONED', 'Item already dispositioned.');
+  if (b.p_request_key) {
+    var ds = state.tables.return_dispositions;
+    var byKey = Array.from(ds.values()).filter(function (x) { return x.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, item_id: it.id };
+  }
+  if (b.p_measured_in == null || b.p_measured_in < 0 || Math.floor(b.p_measured_in) !== b.p_measured_in)
+    return errObj('INVALID_MEASUREMENT', 'Use whole inches.');
+  var now = new Date().toISOString();
+  it.measured_in = b.p_measured_in; it.measured_by = b.p_employee || null; it.measured_at = now;
+  if (it.status === 'PENDING') it.status = 'MEASURED';
+  it.updated_at = now;
+  return { ok: true, duplicate: false, item_id: it.id, measured_in: it.measured_in };
+}
+function rpcInspectReturnItem(b, role) {
+  var it = state.tables.return_items.get(b.p_item_id);
+  if (!it) return errObj('RETURN_ITEM_NOT_FOUND', 'Return item does not exist.');
+  if (it.status === 'DISPOSITION_COMPLETE')
+    return errObj('ALREADY_DISPOSITIONED', 'Item already dispositioned.');
+  var now = new Date().toISOString();
+  it.condition = b.p_condition; if (b.p_notes != null) it.notes = b.p_notes;
+  it.status = 'INSPECTED'; it.updated_at = now;
+  var r = state.tables.returns.get(it.return_id);
+  if (r && (r.status === 'RECEIVED' || r.status === 'PENDING')) { r.status = 'INSPECTION'; r.updated_at = now; }
+  return { ok: true, duplicate: false, item_id: it.id };
+}
+function rpcReturnRestock(b, role) {
+  var _auth = requireRole(role, ['SUPERVISOR']);
+  if (_auth) return _auth;
+  var is = state.tables.return_items, ds = state.tables.return_dispositions, rolls = state.tables.rolls;
+  var now = new Date().toISOString();
+  var it = is.get(b.p_item_id);
+  if (!it) return errObj('RETURN_ITEM_NOT_FOUND', 'Return item does not exist.');
+  /* Idempotency first: a retried tap returns the original disposition even
+     though the item is now DISPOSITION_COMPLETE. */
+  if (b.p_request_key) {
+    var byKey = Array.from(ds.values()).filter(function (x) { return x.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, disposition_id: byKey.id,
+      previous_balance_in: byKey.previous_balance_in, quantity_in: byKey.quantity_in,
+      new_balance_in: byKey.new_balance_in, new_version: rolls.get(b.p_roll_id).version };
+  }
+  if (it.status === 'DISPOSITION_COMPLETE')
+    return errObj('ALREADY_DISPOSITIONED', 'Item already dispositioned.');
+  var roll = rolls.get(b.p_roll_id);
+  if (!roll) return errObj('ROLL_NOT_FOUND', 'Roll does not exist.');
+  if (b.p_roll_version != null && roll.version !== b.p_roll_version)
+    return errObj('ROLL_VERSION_CONFLICT', 'ROLL UPDATED BY ANOTHER DEVICE',
+      { current_version: roll.version });
+  if (!it.condition || RESTOCKABLE.indexOf(it.condition) < 0)
+    return errObj('CONDITION_NOT_RESTOCKABLE',
+      'Condition ' + (it.condition || 'UNKNOWN') + ' cannot merge into a trusted roll.');
+  var qty = it.measured_in != null ? it.measured_in : it.returned_quantity_in;
+  if (qty == null || qty <= 0) return errObj('NO_QUANTITY', 'Measure the return before restock.');
+  var prev = roll.expected_in;
+  roll.expected_in = prev + qty;
+  roll.version = roll.version + 1;
+  if (b.p_location_code) roll.location_code = b.p_location_code;
+  var d = { id: nid('RD'), return_id: it.return_id, return_item_id: it.id,
+    disposition: 'RESTOCK', decided_by: b.p_employee || null, approved_by: b.p_approver || b.p_employee || null,
+    reason: 'Restock approved', location_code: b.p_location_code || null,
+    previous_balance_in: prev, quantity_in: qty, new_balance_in: roll.expected_in,
+    vendor_supplier: null, vendor_reference: null, vendor_status: null,
+    created_at: now, client_request_key: b.p_request_key || null };
+  ds.set(d.id, d);
+  it.disposition = 'RESTOCK'; it.status = 'DISPOSITION_COMPLETE';
+  if (b.p_location_code) it.location_code = b.p_location_code;
+  it.updated_at = now;
+  state.tables.history_events.set(nid('H'), { id: nid('H'), roll_id: roll.id,
+    warehouse_id: roll.warehouse_id, event_type: 'RETURN_RESTOCK_APPROVED',
+    detail: 'Restock approved: +' + qty + 'in from return.', created_at: now });
+  state.tables.history_events.set(nid('H'), { id: nid('H'), roll_id: roll.id,
+    warehouse_id: roll.warehouse_id, event_type: 'BALANCE_INCREASED_FROM_RETURN',
+    detail: prev + 'in → ' + roll.expected_in + 'in.', created_at: now });
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: roll.warehouse_id,
+    action: 'RETURN_RESTOCKED', entity_type: 'return', entity_id: it.return_id,
+    user_name: b.p_employee || null, created_at: now });
+  return { ok: true, duplicate: false, disposition_id: d.id,
+    previous_balance_in: prev, quantity_in: qty,
+    new_balance_in: roll.expected_in, new_version: roll.version };
+}
+function rpcCreateReturnedRemnant(b, role) {
+  var _auth = requireRole(role, ['SUPERVISOR']);
+  if (_auth) return _auth;
+  var is = state.tables.return_items, ds = state.tables.return_dispositions, ms = state.tables.returned_remnants;
+  var now = new Date().toISOString();
+  var it = is.get(b.p_item_id);
+  if (!it) return errObj('RETURN_ITEM_NOT_FOUND', 'Return item does not exist.');
+  if (it.status === 'DISPOSITION_COMPLETE')
+    return errObj('ALREADY_DISPOSITIONED', 'Item already dispositioned.');
+  if (b.p_request_key) {
+    var byKey = Array.from(ds.values()).filter(function (x) { return x.client_request_key === b.p_request_key; })[0];
+    if (byKey) {
+      var prev = Array.from(ms.values()).filter(function (m) { return m.return_item_id === it.id; })[0];
+      return { ok: true, duplicate: true, remnant_id: prev && prev.id, remnant_number: prev && prev.remnant_number };
+    }
+  }
+  var len = b.p_length_in;
+  if (len == null || len <= 0 || Math.floor(len) !== len)
+    return errObj('INVALID_LENGTH', 'Remnant length must be positive whole inches.');
+  var num = issueNum('REM', 'rem-num:' + it.id + ':' + len);
+  var m = { id: nid('REM'), remnant_number: num, parent_roll_id: it.roll_id || null,
+    warehouse_id: it.warehouse_id || 'main',
+    return_id: it.return_id, return_item_id: it.id,
+    material_type: it.material_type, style: it.style, color: it.color, width_in: it.width_in,
+    length_in: len, condition: it.condition, location_code: b.p_location_code || null,
+    status: 'AVAILABLE', created_by: b.p_employee || null,
+    created_at: now, updated_at: now, client_request_key: b.p_request_key || null };
+  ms.set(m.id, m);
+  ds.set(nid('RD'), { id: nid('RD'), return_id: it.return_id, return_item_id: it.id,
+    disposition: 'RESTOCK', decided_by: b.p_employee || null, approved_by: b.p_employee || null,
+    reason: 'Returned remnant ' + num + ' created', location_code: b.p_location_code || null,
+    previous_balance_in: null, quantity_in: len, new_balance_in: null,
+    vendor_supplier: null, vendor_reference: null, vendor_status: null,
+    created_at: now, client_request_key: b.p_request_key || null });
+  it.disposition = 'RESTOCK'; it.status = 'DISPOSITION_COMPLETE';
+  if (b.p_location_code) it.location_code = b.p_location_code;
+  it.updated_at = now;
+  if (it.roll_id) {
+    var roll = state.tables.rolls.get(it.roll_id);
+    state.tables.history_events.set(nid('H'), { id: nid('H'), roll_id: it.roll_id,
+      warehouse_id: roll ? roll.warehouse_id : 'main', event_type: 'RETURN_REMNANT_CREATED',
+      detail: 'Returned remnant ' + num + ' (' + len + 'in) created. Parent balance unchanged.',
+      created_at: now });
+  }
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: it.warehouse_id,
+    action: 'RETURN_REMNANT_CREATED', entity_type: 'return', entity_id: it.return_id,
+    user_name: b.p_employee || null, created_at: now });
+  return { ok: true, duplicate: false, remnant_id: m.id, remnant_number: num };
+}
+function rpcQuarantineReturnItem(b, role) {
+  var _auth = requireRole(role, ['SUPERVISOR']);
+  if (_auth) return _auth;
+  var is = state.tables.return_items, ds = state.tables.return_dispositions, ms = state.tables.returned_remnants;
+  var now = new Date().toISOString();
+  var it = is.get(b.p_item_id);
+  if (!it) return errObj('RETURN_ITEM_NOT_FOUND', 'Return item does not exist.');
+  if (it.status === 'DISPOSITION_COMPLETE')
+    return errObj('ALREADY_DISPOSITIONED', 'Item already dispositioned.');
+  if (!String(b.p_reason || '').trim()) return errObj('REASON_REQUIRED', 'A quarantine reason is required.');
+  if (b.p_request_key) {
+    var byKey = Array.from(ds.values()).filter(function (x) { return x.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, disposition_id: byKey.id };
+  }
+  var m = { id: nid('REM'), remnant_number: 'Q-' + nid('').slice(0, 8).toUpperCase(),
+    parent_roll_id: it.roll_id || null, return_id: it.return_id, return_item_id: it.id,
+    material_type: it.material_type, style: it.style, color: it.color, width_in: it.width_in,
+    length_in: it.measured_in != null ? it.measured_in : (it.returned_quantity_in || 0),
+    condition: it.condition, location_code: b.p_location_code || null,
+    status: 'QUARANTINED', created_by: b.p_employee || null,
+    created_at: now, updated_at: now, client_request_key: b.p_request_key || null };
+  ms.set(m.id, m);
+  var d = { id: nid('RD'), return_id: it.return_id, return_item_id: it.id,
+    disposition: 'QUARANTINE', decided_by: b.p_employee || null, approved_by: b.p_employee || null,
+    reason: b.p_reason, location_code: b.p_location_code || null,
+    previous_balance_in: null, quantity_in: null, new_balance_in: null,
+    vendor_supplier: null, vendor_reference: null, vendor_status: null,
+    created_at: now, client_request_key: b.p_request_key || null };
+  ds.set(d.id, d);
+  it.disposition = 'QUARANTINE'; it.status = 'DISPOSITION_COMPLETE';
+  if (b.p_location_code) it.location_code = b.p_location_code;
+  it.updated_at = now;
+  return { ok: true, duplicate: false, disposition_id: d.id };
+}
+function rpcScrapReturnItem(b, role) {
+  var _auth = requireRole(role, ['MANAGER']);
+  if (_auth) return _auth;
+  var is = state.tables.return_items, ds = state.tables.return_dispositions;
+  var now = new Date().toISOString();
+  var it = is.get(b.p_item_id);
+  if (!it) return errObj('RETURN_ITEM_NOT_FOUND', 'Return item does not exist.');
+  if (it.status === 'DISPOSITION_COMPLETE')
+    return errObj('ALREADY_DISPOSITIONED', 'Item already dispositioned.');
+  if (!String(b.p_reason || '').trim()) return errObj('REASON_REQUIRED', 'A scrap reason is required.');
+  if (b.p_request_key) {
+    var byKey = Array.from(ds.values()).filter(function (x) { return x.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, disposition_id: byKey.id };
+  }
+  var d = { id: nid('RD'), return_id: it.return_id, return_item_id: it.id,
+    disposition: 'SCRAP', decided_by: b.p_employee || null, approved_by: b.p_employee || null,
+    reason: b.p_reason, location_code: null,
+    previous_balance_in: null, quantity_in: null, new_balance_in: null,
+    vendor_supplier: null, vendor_reference: null, vendor_status: null,
+    created_at: now, client_request_key: b.p_request_key || null };
+  ds.set(d.id, d);
+  it.disposition = 'SCRAP'; it.status = 'DISPOSITION_COMPLETE'; it.updated_at = now;
+  return { ok: true, duplicate: false, disposition_id: d.id };
+}
+function rpcSendReturnToVendor(b, role) {
+  var _auth = requireRole(role, ['MANAGER']);
+  if (_auth) return _auth;
+  var is = state.tables.return_items, ds = state.tables.return_dispositions;
+  var now = new Date().toISOString();
+  var it = is.get(b.p_item_id);
+  if (!it) return errObj('RETURN_ITEM_NOT_FOUND', 'Return item does not exist.');
+  if (it.status === 'DISPOSITION_COMPLETE')
+    return errObj('ALREADY_DISPOSITIONED', 'Item already dispositioned.');
+  if (b.p_request_key) {
+    var byKey = Array.from(ds.values()).filter(function (x) { return x.client_request_key === b.p_request_key; })[0];
+    if (byKey) return { ok: true, duplicate: true, disposition_id: byKey.id, vendor_status: byKey.vendor_status };
+  }
+  var d = { id: nid('RD'), return_id: it.return_id, return_item_id: it.id,
+    disposition: 'RETURN_TO_VENDOR', decided_by: b.p_employee || null, approved_by: b.p_employee || null,
+    reason: 'Vendor return', location_code: null,
+    previous_balance_in: null, quantity_in: null, new_balance_in: null,
+    vendor_supplier: b.p_supplier || null, vendor_reference: b.p_reference || null,
+    vendor_status: 'PENDING_VENDOR_RETURN',
+    created_at: now, client_request_key: b.p_request_key || null };
+  ds.set(d.id, d);
+  it.disposition = 'RETURN_TO_VENDOR'; it.status = 'DISPOSITION_COMPLETE'; it.updated_at = now;
+  return { ok: true, duplicate: false, disposition_id: d.id, vendor_status: 'PENDING_VENDOR_RETURN' };
+}
+function rpcHoldReturnItem(b, role) {
+  var _auth = requireRole(role, ['SUPERVISOR']);
+  if (_auth) return _auth;
+  var it = state.tables.return_items.get(b.p_item_id);
+  if (!it) return errObj('RETURN_ITEM_NOT_FOUND', 'Return item does not exist.');
+  if (it.status === 'DISPOSITION_COMPLETE')
+    return errObj('ALREADY_DISPOSITIONED', 'Item already dispositioned.');
+  it.disposition = 'HOLD_FOR_REVIEW'; it.status = 'DISPOSITION_DECIDED';
+  if (b.p_reason) it.notes = b.p_reason;
+  it.updated_at = new Date().toISOString();
+  return { ok: true, duplicate: false, item_id: it.id };
+}
+function rpcCompleteReturn(b, role) {
+  var _auth = requireRole(role, ['SUPERVISOR']);
+  if (_auth) return _auth;
+  var rs = state.tables.returns, is = state.tables.return_items;
+  var r = rs.get(b.p_return_id);
+  if (!r) return errObj('RETURN_NOT_FOUND', 'Return does not exist.');
+  if (r.status === 'COMPLETED') return { ok: true, duplicate: true, return_id: r.id };
+  if (r.status === 'CANCELLED') return errObj('RETURN_CANCELLED', 'Return is cancelled.');
+  var open = Array.from(is.values()).filter(function (i) {
+    return i.return_id === r.id &&
+      i.status !== 'DISPOSITION_COMPLETE' && i.status !== 'CANCELLED';
+  });
+  if (open.length) return errObj('ITEMS_PENDING', open.length + ' item(s) still need a completed disposition.');
+  var now = new Date().toISOString();
+  r.status = 'COMPLETED'; r.completed_at = now; r.updated_at = now;
+  state.tables.audit_events.set(nid('A'), { id: nid('A'), warehouse_id: r.warehouse_id,
+    action: 'RETURN_COMPLETED', entity_type: 'return', entity_id: r.id,
+    user_name: b.p_employee || null, created_at: now });
+  return { ok: true, duplicate: false, return_id: r.id };
+}
+function rpcCancelReturn(b, role) {
+  var r = state.tables.returns.get(b.p_return_id);
+  if (!r) return errObj('RETURN_NOT_FOUND', 'Return does not exist.');
+  if (r.status === 'COMPLETED') return errObj('RETURN_COMPLETED', 'A completed return cannot be cancelled.');
+  if (r.status === 'CANCELLED') return { ok: true, duplicate: true, return_id: r.id };
+  r.status = 'CANCELLED'; if (b.p_reason) r.notes = b.p_reason;
+  r.updated_at = new Date().toISOString();
+  return { ok: true, duplicate: false, return_id: r.id };
+}
+function rpcRaiseReturnException(b, role) {
+  var rs = state.tables.returns, es = state.tables.return_exceptions;
+  var r = rs.get(b.p_return_id);
+  if (!r) return errObj('RETURN_NOT_FOUND', 'Return does not exist.');
+  var now = new Date().toISOString();
+  var e = { id: nid('RX'), return_id: r.id, return_item_id: b.p_item_id || null,
+    kind: b.p_kind || 'OTHER', detail: b.p_detail || null, status: 'OPEN',
+    raised_by: b.p_employee || null, resolved_by: null, resolved_at: null, created_at: now };
+  es.set(e.id, e);
+  if (r.status !== 'COMPLETED' && r.status !== 'CANCELLED') { r.status = 'EXCEPTION'; r.updated_at = now; }
+  return { ok: true, exception_id: e.id };
+}
+function rpcResolveReturnException(b, role) {
+  var _auth = requireRole(role, ['SUPERVISOR']);
+  if (_auth) return _auth;
+  var es = state.tables.return_exceptions, rs = state.tables.returns;
+  var e = es.get(b.p_exception_id);
+  if (!e) return errObj('EXCEPTION_NOT_FOUND', 'Exception does not exist.');
+  if (e.status === 'RESOLVED') return { ok: true, duplicate: true, exception_id: e.id };
+  var now = new Date().toISOString();
+  e.status = 'RESOLVED'; e.resolved_by = b.p_employee || null; e.resolved_at = now;
+  var stillOpen = Array.from(es.values()).filter(function (x) {
+    return x.return_id === e.return_id && x.status === 'OPEN';
+  });
+  var r = rs.get(e.return_id);
+  if (!stillOpen.length && r && r.status === 'EXCEPTION') { r.status = 'INSPECTION'; r.updated_at = now; }
+  return { ok: true, duplicate: false, exception_id: e.id };
+}
+
   var server = http.createServer(function (req, res) {
     var parsed = url.parse(req.url, true);
     var p = parsed.path;
@@ -646,6 +1040,23 @@ function rpcCompleteReceipt(b) {
         else if (rm[1] === 'receive_roll') out = rpcReceiveRoll(body || {});
         else if (rm[1] === 'create_receipt_exception') out = rpcCreateReceiptException(body || {});
         else if (rm[1] === 'complete_receipt') out = rpcCompleteReceipt(body || {});
+        /* Run 8: returns. Role passed for server-side authorization simulation. */
+        else if (rm[1] === 'create_return') out = rpcCreateReturn(body || {}, roleOf(req));
+        else if (rm[1] === 'receive_return') out = rpcReceiveReturn(body || {}, roleOf(req));
+        else if (rm[1] === 'submit_return') out = rpcSubmitReturn(body || {}, roleOf(req));
+        else if (rm[1] === 'add_return_item') out = rpcAddReturnItem(body || {}, roleOf(req));
+        else if (rm[1] === 'measure_return_item') out = rpcMeasureReturnItem(body || {}, roleOf(req));
+        else if (rm[1] === 'inspect_return_item') out = rpcInspectReturnItem(body || {}, roleOf(req));
+        else if (rm[1] === 'return_restock') out = rpcReturnRestock(body || {}, roleOf(req));
+        else if (rm[1] === 'create_returned_remnant') out = rpcCreateReturnedRemnant(body || {}, roleOf(req));
+        else if (rm[1] === 'quarantine_return_item') out = rpcQuarantineReturnItem(body || {}, roleOf(req));
+        else if (rm[1] === 'scrap_return_item') out = rpcScrapReturnItem(body || {}, roleOf(req));
+        else if (rm[1] === 'send_return_to_vendor') out = rpcSendReturnToVendor(body || {}, roleOf(req));
+        else if (rm[1] === 'hold_return_item') out = rpcHoldReturnItem(body || {}, roleOf(req));
+        else if (rm[1] === 'complete_return') out = rpcCompleteReturn(body || {}, roleOf(req));
+        else if (rm[1] === 'cancel_return') out = rpcCancelReturn(body || {}, roleOf(req));
+        else if (rm[1] === 'raise_return_exception') out = rpcRaiseReturnException(body || {}, roleOf(req));
+        else if (rm[1] === 'resolve_return_exception') out = rpcResolveReturnException(body || {}, roleOf(req));
         else return send(res, 404, { message: 'unknown rpc' });
         return send(res, 200, out);
       }
@@ -692,6 +1103,13 @@ function rpcCompleteReceipt(b) {
 
   return {
     state: state,
+    /* Run 8: set the simulated backend role for a signed-in session
+       (identified by email). Used to test server-side authorization. */
+    setRole: function (email, role) {
+      Object.keys(state.sessions).forEach(function (tok) {
+        if (state.sessions[tok].email === email) state.sessions[tok].role = role;
+      });
+    },
     start: function () {
       return new Promise(function (resolve) {
         server.listen(0, '127.0.0.1', function () {

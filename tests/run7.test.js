@@ -85,7 +85,7 @@ async function rejectsCode(p, code) {
 async function main() {
   /* ================= A. schema 6 + migration ================= */
   var S = makeDevice();
-  ok(S.DB.data.schema === 6, 'seed schema is 6');
+  ok(S.DB.data.schema === 7, 'seed schema is 7');
   ok(Array.isArray(S.FG().loadouts) && Array.isArray(S.FG().receipts) &&
      Array.isArray(S.FG().loadoutEvents) && Array.isArray(S.FG().receiptEvents),
     'seed carries loadout + receipt collections');
