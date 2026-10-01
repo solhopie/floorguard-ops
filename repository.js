@@ -698,20 +698,66 @@ var LocalRepo = {
     var rid = (id && typeof id === 'object') ? id.id : id;
     return Promise.resolve(receiveReturnLocal(rid));
   },
-  addReturnItem: function (returnId, it) { return Promise.resolve(addReturnItemLocal(returnId, it)); },
-  measureReturnItem: function (itemId, inches) { return Promise.resolve(measureReturnItemLocal(itemId, inches)); },
-  inspectReturnItem: function (itemId, condition, notes) { return Promise.resolve(inspectReturnItemLocal(itemId, condition, notes)); },
-  submitReturn: function (id) { return Promise.resolve(submitReturnLocal(id)); },
-  approveRestock: function (itemId, o) { return Promise.resolve(approveRestockLocal(itemId, o)); },
-  createReturnedRemnant: function (itemId, o) { return Promise.resolve(createReturnedRemnantLocal(itemId, o)); },
-  quarantineReturnItem: function (itemId, o) { return Promise.resolve(quarantineReturnItemLocal(itemId, o)); },
-  scrapReturnItem: function (itemId, o) { return Promise.resolve(scrapReturnItemLocal(itemId, o)); },
-  sendReturnToVendor: function (itemId, o) { return Promise.resolve(sendReturnToVendorLocal(itemId, o)); },
-  holdReturnItem: function (itemId, reason) { return Promise.resolve(holdReturnItemLocal(itemId, reason)); },
-  completeReturn: function (id) { return Promise.resolve(completeReturnLocal(id)); },
-  cancelReturn: function (id, reason) { return Promise.resolve(cancelReturnLocal(id, reason)); },
-  raiseReturnException: function (returnId, o) { return Promise.resolve(raiseReturnExceptionLocal(returnId, o)); },
-  resolveReturnException: function (exceptionId, resolution) { return Promise.resolve(resolveReturnExceptionLocal(exceptionId, resolution)); },
+  addReturnItem: function (returnId, it) {
+    /* Accept (returnId, it) or a single object with returnId (UI passes object). */
+    if (returnId && typeof returnId === 'object' && !it) { it = returnId; returnId = it.returnId; }
+    return Promise.resolve(addReturnItemLocal(returnId, it));
+  },
+  measureReturnItem: function (itemId, inches) {
+    /* Accept (itemId, inches) or { itemId, measuredIn }. */
+    if (itemId && typeof itemId === 'object') { inches = itemId.measuredIn; itemId = itemId.itemId; }
+    return Promise.resolve(measureReturnItemLocal(itemId, inches));
+  },
+  inspectReturnItem: function (itemId, condition, notes) {
+    /* Accept (itemId, condition, notes) or { itemId, condition, notes }. */
+    if (itemId && typeof itemId === 'object') { notes = itemId.notes; condition = itemId.condition; itemId = itemId.itemId; }
+    return Promise.resolve(inspectReturnItemLocal(itemId, condition, notes));
+  },
+  submitReturn: function (id) {
+    if (id && typeof id === 'object') id = id.id;
+    return Promise.resolve(submitReturnLocal(id));
+  },
+  approveRestock: function (itemId, o) {
+    /* Accept (itemId, o) or a single object with itemId. */
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
+    return Promise.resolve(approveRestockLocal(itemId, o));
+  },
+  createReturnedRemnant: function (itemId, o) {
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
+    return Promise.resolve(createReturnedRemnantLocal(itemId, o));
+  },
+  quarantineReturnItem: function (itemId, o) {
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
+    return Promise.resolve(quarantineReturnItemLocal(itemId, o));
+  },
+  scrapReturnItem: function (itemId, o) {
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
+    return Promise.resolve(scrapReturnItemLocal(itemId, o));
+  },
+  sendReturnToVendor: function (itemId, o) {
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
+    return Promise.resolve(sendReturnToVendorLocal(itemId, o));
+  },
+  holdReturnItem: function (itemId, reason) {
+    if (itemId && typeof itemId === 'object') { reason = itemId.reason; itemId = itemId.itemId; }
+    return Promise.resolve(holdReturnItemLocal(itemId, reason));
+  },
+  completeReturn: function (id) {
+    if (id && typeof id === 'object') id = id.id;
+    return Promise.resolve(completeReturnLocal(id));
+  },
+  cancelReturn: function (id, reason) {
+    if (id && typeof id === 'object') { reason = id.reason; id = id.id; }
+    return Promise.resolve(cancelReturnLocal(id, reason));
+  },
+  raiseReturnException: function (returnId, o) {
+    if (returnId && typeof returnId === 'object' && !o) { o = returnId; returnId = o.returnId; }
+    return Promise.resolve(raiseReturnExceptionLocal(returnId, o));
+  },
+  resolveReturnException: function (exceptionId, resolution) {
+    if (exceptionId && typeof exceptionId === 'object') { resolution = exceptionId.resolution; exceptionId = exceptionId.exceptionId; }
+    return Promise.resolve(resolveReturnExceptionLocal(exceptionId, resolution));
+  },
   uploadReturnDocument: function (o) {
     /* o: {returnId, docType, imageDataUrl, thumbDataUrl, mimeType, employee} */
     var now = new Date();
@@ -1811,6 +1857,7 @@ var SharedRepo = {
   },
   submitReturn: function (id) {
     var self = this;
+    if (id && typeof id === 'object') id = id.id;
     self._requireOnline('OFFLINE — RETURN NOT SUBMITTED');
     self._requireOrderPolicy(returnPolicy().canCreateReturn, 'Not authorized to submit returns.');
     return self._rpc('submit_return', {
@@ -1825,6 +1872,8 @@ var SharedRepo = {
   },
   addReturnItem: function (returnId, it) {
     var self = this;
+    /* Accept (returnId, it) or a single object with returnId (UI passes object). */
+    if (returnId && typeof returnId === 'object' && !it) { it = returnId; returnId = it.returnId; }
     self._requireOnline('OFFLINE — RETURN ITEM NOT ADDED');
     self._requireOrderPolicy(returnPolicy().canCreateReturn, 'Not authorized to create returns.');
     it = it || {};
@@ -1851,6 +1900,7 @@ var SharedRepo = {
   },
   measureReturnItem: function (itemId, inches) {
     var self = this;
+    if (itemId && typeof itemId === 'object') { inches = itemId.measuredIn; itemId = itemId.itemId; }
     self._requireOnline('OFFLINE — RETURN NOT MEASURED');
     self._requireOrderPolicy(returnPolicy().canMeasureReturn, 'Not authorized to measure returns.');
     return self._rpc('measure_return_item', {
@@ -1866,6 +1916,7 @@ var SharedRepo = {
   },
   inspectReturnItem: function (itemId, condition, notes) {
     var self = this;
+    if (itemId && typeof itemId === 'object') { notes = itemId.notes; condition = itemId.condition; itemId = itemId.itemId; }
     self._requireOnline('OFFLINE — RETURN NOT INSPECTED');
     self._requireOrderPolicy(returnPolicy().canInspectReturn, 'Not authorized to inspect returns.');
     return self._rpc('inspect_return_item', {
@@ -1883,6 +1934,7 @@ var SharedRepo = {
     /* THE atomic balance change. Optimistic version guard: on a stale
        version the RPC raises ROLL_VERSION_CONFLICT and nothing is written. */
     var self = this;
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
     self._requireOnline('OFFLINE — RESTOCK NOT SYNCED');
     self._requireOrderPolicy(returnPolicy().canApproveRestock, 'Restock approval requires a supervisor or above.');
     o = o || {};
@@ -1902,6 +1954,7 @@ var SharedRepo = {
   },
   createReturnedRemnant: function (itemId, o) {
     var self = this;
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
     self._requireOnline('OFFLINE — REMNANT NOT CREATED');
     self._requireOrderPolicy(returnPolicy().canCreateRemnant, 'Remnant creation requires a supervisor or above.');
     o = o || {};
@@ -1919,6 +1972,7 @@ var SharedRepo = {
   },
   quarantineReturnItem: function (itemId, o) {
     var self = this;
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
     self._requireOnline('OFFLINE — RETURN NOT QUARANTINED');
     self._requireOrderPolicy(returnPolicy().canQuarantine, 'Quarantine requires a supervisor or above.');
     o = o || {};
@@ -1936,6 +1990,7 @@ var SharedRepo = {
   },
   scrapReturnItem: function (itemId, o) {
     var self = this;
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
     self._requireOnline('OFFLINE — RETURN NOT SCRAPPED');
     self._requireOrderPolicy(returnPolicy().canScrap, 'Scrap authorization requires a manager or admin.');
     o = o || {};
@@ -1952,6 +2007,7 @@ var SharedRepo = {
   },
   sendReturnToVendor: function (itemId, o) {
     var self = this;
+    if (itemId && typeof itemId === 'object' && !o) { o = itemId; itemId = o.itemId; }
     self._requireOnline('OFFLINE — VENDOR RETURN NOT RECORDED');
     self._requireOrderPolicy(returnPolicy().canVendorReturn, 'Vendor returns require a manager or admin.');
     o = o || {};
@@ -1968,6 +2024,7 @@ var SharedRepo = {
   },
   holdReturnItem: function (itemId, reason) {
     var self = this;
+    if (itemId && typeof itemId === 'object') { reason = itemId.reason; itemId = itemId.itemId; }
     self._requireOnline('OFFLINE — HOLD NOT RECORDED');
     self._requireOrderPolicy(returnPolicy().canQuarantine, 'Hold for review requires a supervisor or above.');
     return self._rpc('hold_return_item', {
@@ -1983,6 +2040,7 @@ var SharedRepo = {
   },
   completeReturn: function (id) {
     var self = this;
+    if (id && typeof id === 'object') id = id.id;
     self._requireOnline('OFFLINE — RETURN NOT COMPLETED');
     self._requireOrderPolicy(returnPolicy().canApproveRestock, 'Completing a return requires a supervisor or above.');
     return self._rpc('complete_return', {
@@ -1997,6 +2055,7 @@ var SharedRepo = {
   },
   cancelReturn: function (id, reason) {
     var self = this;
+    if (id && typeof id === 'object') { reason = id.reason; id = id.id; }
     self._requireOnline('OFFLINE — RETURN NOT CANCELLED');
     self._requireOrderPolicy(returnPolicy().canCancelReturn, 'Cancelling a return requires a manager or admin.');
     return self._rpc('cancel_return', {
@@ -2011,6 +2070,7 @@ var SharedRepo = {
   },
   raiseReturnException: function (returnId, o) {
     var self = this;
+    if (returnId && typeof returnId === 'object' && !o) { o = returnId; returnId = o.returnId; }
     self._requireOnline('OFFLINE — EXCEPTION NOT RAISED');
     self._requireOrderPolicy(returnPolicy().canCreateReturn, 'Not authorized to raise return exceptions.');
     o = o || {};
@@ -2028,6 +2088,7 @@ var SharedRepo = {
   },
   resolveReturnException: function (exceptionId, resolution) {
     var self = this;
+    if (exceptionId && typeof exceptionId === 'object') { resolution = exceptionId.resolution; exceptionId = exceptionId.exceptionId; }
     self._requireOnline('OFFLINE — EXCEPTION NOT RESOLVED');
     self._requireOrderPolicy(returnPolicy().canResolveReturnExceptions, 'Resolving exceptions requires a supervisor or above.');
     return self._rpc('resolve_return_exception', {

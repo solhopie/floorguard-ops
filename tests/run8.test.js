@@ -516,6 +516,20 @@ async function main() {
   ok(pol.canCompleteReturn === true, 'returnPolicy defines canCompleteReturn');
   /* P4: RECEIVED tab exists so received returns are visible */
   ok(RB.returnTabs().indexOf('RECEIVED') >= 0, 'returnTabs includes RECEIVED');
+  /* P5: Repository facade accepts UI-style object calls (not just positional args) */
+  var RC = makeDevice();
+  setRole(RC, 'SUPERVISOR');
+  var rcr = RC.createReturnLocal({ reason: 'EXCESS MATERIAL', requestKey: 'rcrk-1' });
+  var rcRecv = await RC.Repository.receiveReturn({ id: rcr.return.id });
+  ok(rcRecv.ok && rcRecv.return.status === 'RECEIVED', 'facade receiveReturn({id}) works');
+  var rcItem = await RC.Repository.addReturnItem({ returnId: rcr.return.id, requestKey: 'rcik-1' });
+  ok(rcItem.ok && rcItem.item.returnId === rcr.return.id, 'facade addReturnItem({returnId,...}) works');
+  var rcMeas = await RC.Repository.measureReturnItem({ itemId: rcItem.item.id, measuredIn: 60 });
+  ok(rcMeas.ok && rcMeas.item.measuredIn === 60, 'facade measureReturnItem({itemId,measuredIn}) works');
+  var rcInsp = await RC.Repository.inspectReturnItem({ itemId: rcItem.item.id, condition: 'GOOD' });
+  ok(rcInsp.ok && rcInsp.item.condition === 'GOOD', 'facade inspectReturnItem({itemId,...}) works');
+  var rcSub = await RC.Repository.submitReturn({ id: rcr.return.id });
+  ok(rcSub.ok && rcSub.return.status === 'READY_FOR_DISPOSITION', 'facade submitReturn({id}) works');
 
   await harness.close();
   console.log('run8: ' + passed + ' passed, ' + failed + ' failed');
