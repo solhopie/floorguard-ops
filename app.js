@@ -5097,7 +5097,7 @@ Screens['receipt'] = function (param) {
     '<h2>Documents (' + docs.length + ')</h2>' +
     '<div class="card">' +
     (docs.length ? docs.map(function (d) {
-      return '<button class="rowbtn" data-docview="' + esc(d.id) + '"><div class="rhead"><b>HISTORY CARD</b> ' +
+      return '<button class="rowbtn" data-docview="' + esc(d.id) + '"><div class="rhead"><b>' + esc((d.docType || 'DOCUMENT').toUpperCase()) + (d.num ? ' #' + d.num : '') + '</b> ' +
         '<span class="sub">' + fmtDT(d.at) + '</span></div><div class="sub">' + esc(d.employee || '') + '</div></button>';
     }).join('') : '<p class="hint">No documents captured.</p>') +
     (done || !pol.canReceiveMaterial ? '' : '<button class="btn" id="rc-doc">📷 CAPTURE DOCUMENT</button>') +
@@ -8421,10 +8421,12 @@ Screens['doc'] = function (param) {
       '<div class="sub">Confirmed by ' + esc(imp.confirmedBy) + ' &middot; ' + fmtDT(imp.confirmedAt) + '</div></div>';
   }).join('');
   var freshContinue = D && D.fresh && D.docId === doc.id && D.returnTo;
+  var isReceiptDoc = doc.kind === 'RECEIPT_DOCUMENT';
+  var rcpt = (!doc.rollId && doc.receiptId && typeof receiptById === 'function') ? receiptById(doc.receiptId) : null;
   var html =
     '<div class="screen">' +
-    '<div class="step-head">ROLL DOCUMENT</div>' +
-    '<h1 class="mono">HISTORY CARD #' + doc.num + '</h1>' +
+    '<div class="step-head">' + (isReceiptDoc ? 'RECEIPT DOCUMENT' : 'ROLL DOCUMENT') + '</div>' +
+    '<h1 class="mono">' + esc(doc.docType) + (doc.num ? ' #' + doc.num : '') + '</h1>' +
     '<div class="card" style="text-align:center">' +
       '<img id="docimg" style="max-width:100%;border-radius:8px"' +
         (doc.thumb ? ' src="' + doc.thumb + '"' : ' alt="Loading history card…"') + '>' +
@@ -8432,7 +8434,9 @@ Screens['doc'] = function (param) {
       '<br><button class="btn" id="vieworig" style="margin-top:10px">&#128269; VIEW ORIGINAL</button>' +
     '</div>' +
     '<div class="card">' +
-      '<div class="kv"><span class="k">Roll</span><span class="v mono">' + esc(doc.rollId) + '</span></div>' +
+      (doc.rollId
+        ? '<div class="kv"><span class="k">Roll</span><span class="v mono">' + esc(doc.rollId) + '</span></div>'
+        : '<div class="kv"><span class="k">Receipt</span><span class="v mono">' + esc((rcpt && rcpt.number) || doc.receiptId || '&mdash;') + '</span></div>') +
       '<div class="kv"><span class="k">Document Type</span><span class="v">' + esc(doc.docType) + '</span></div>' +
       '<div class="kv"><span class="k">Captured</span><span class="v">' + esc(doc.date) + ' &middot; ' + esc(doc.time) + '</span></div>' +
       '<div class="kv"><span class="k">Employee</span><span class="v">' + esc(doc.employee) + '</span></div>' +
@@ -8440,7 +8444,8 @@ Screens['doc'] = function (param) {
       '<div class="kv"><span class="k">Source</span><span class="v"><span class="srcchip">PAPER CARD</span></span></div>' +
     '</div>' +
     imports +
-    '<button class="btn btn-huge" id="extract">&#10024; EXTRACT HISTORY FROM CARD</button>' +
+    (isReceiptDoc ? '' :
+      '<button class="btn btn-huge" id="extract">&#10024; EXTRACT HISTORY FROM CARD</button>') +
     (freshContinue
       ? '<button class="btn btn-primary btn-huge" id="doccontinue">CONTINUE &rarr;</button>'
       : '<button class="btn btn-ghost" id="docback">&larr; BACK</button>') +
@@ -8464,7 +8469,7 @@ Screens['doc'] = function (param) {
       $('#docoverlay').hidden = false;
     };
     $('#docoverlay').onclick = function () { $('#docoverlay').hidden = true; $('#docfull').removeAttribute('src'); };
-    $('#extract').onclick = function () { go('doc/extract', doc.id); };
+    if ($('#extract')) $('#extract').onclick = function () { go('doc/extract', doc.id); };
     if (freshContinue) {
       $('#doccontinue').onclick = function () { var rt = D.returnTo; D = null; go(rt.name, rt.param); };
     } else {
@@ -8537,7 +8542,7 @@ Screens['doc/extract'] = function (param) {
       '<div class="hint">Handwriting reads may be imperfect. Nothing here is confirmed data — review every field before confirming.</div>' +
       (ext.available ? '' : '<div class="hint">' + esc(ext.note) + '</div>') +
     '</div>' +
-    '<div class="card" style="text-align:center"><img src="' + doc.thumb + '" style="max-width:100%;border-radius:8px"></div>' +
+    '<div class="card" style="text-align:center"><img id="xcardimg" style="max-width:100%;border-radius:8px" alt="History card"></div>' +
     '<div class="field"><label class="label" for="xjob">JOB NUMBER</label><input class="input mono" id="xjob" autocomplete="off" value="' + pre(pf.job) + '"></div>' +
     '<div class="field"><label class="label" for="xorder">ORDER NUMBER</label><input class="input mono" id="xorder" autocomplete="off" value="' + pre(pf.order) + '"></div>' +
     '<div class="label">CUT AMOUNT</div><div class="btn-row">' +
@@ -8559,6 +8564,22 @@ Screens['doc/extract'] = function (param) {
     '</div>' +
     '</div>';
   return { html: html, mount: function () {
+    /* Shared mode: originals live in private storage; pull the card image
+       into memory (never localStorage) so the worker can read it while
+       entering values. */
+    (function loadCardImage() {
+      var im = $('#xcardimg'); if (!im) return;
+      if (doc._imgUrl) { im.src = doc._imgUrl; return; }
+      if (doc.thumb || doc.image) { im.src = doc.thumb || doc.image; return; }
+      if (dataMode() === 'shared' && doc.storagePath && typeof SharedRepo !== 'undefined') {
+        SharedRepo.downloadHistoryCard(doc.storagePath).then(function (url) {
+          doc._imgUrl = url; /* session-only */
+          var el = $('#xcardimg'); if (el) el.src = url;
+        }).catch(function () {
+          var el = $('#xcardimg'); if (el) el.alt = 'Could not load the card image.';
+        });
+      }
+    })();
     $('#xedit').onclick = function () { $('#xjob').focus(); };
     $('#xignore').onclick = function () { history.back(); };
     $('#xconfirm').onclick = function () {
@@ -8599,7 +8620,13 @@ Screens['doc/extract'] = function (param) {
 /* DOCUMENTS section for the Roll History screen. */
 function docsHtml(docs) {
   return docs.map(function (d) {
-    return '<div class="ledger-row"><img class="doc-thumb" src="' + d.thumb + '" alt="History card thumbnail">' +
+    /* Shared mode keeps originals in private storage (never localStorage),
+       so metadata-only docs have no thumb yet — show a placeholder instead
+       of a broken image. The full card loads on the doc screen. */
+    var thumbHtml = (d.thumb || d.image)
+      ? '<img class="doc-thumb" src="' + (d.thumb || d.image) + '" alt="History card thumbnail">'
+      : '<div class="doc-thumb" style="display:flex;align-items:center;justify-content:center;background:var(--card2);font-size:1.6rem" aria-label="History card">&#128247;</div>';
+    return '<div class="ledger-row">' + thumbHtml +
       '<div class="what"><b>HISTORY CARD #' + d.num + '</b> <span class="srcchip">PAPER CARD</span>' +
       '<div class="sub">' + esc(d.date) + ' &middot; ' + esc(d.employee) +
       (d.location ? ' &middot; loc <span class="mono">' + esc(d.location) + '</span>' : '') +

@@ -540,7 +540,7 @@ var Mappers = {
       employee: r.employee_name || '', at: r.captured_at,
       location: r.location_code || null, sessionId: r.session_id || null,
       storagePath: r.storage_path, image: null, thumb: null,
-      imports: [], source: 'SHARED BACKEND'
+      imports: [], source: 'PAPER CARD'
     };
   },
 
@@ -2005,6 +2005,21 @@ var SharedRepo = {
         });
         return doc;
       });
+      /* Shared rows carry no stored num; derive the per-roll / per-receipt
+         sequence (oldest first) so the doc screen, document lists, and
+         exports never render "HISTORY CARD #undefined". */
+      (function assignDocNums() {
+        var groups = {};
+        fg.documents.forEach(function (doc) {
+          var key = doc.rollId ? 'roll:' + doc.rollId : (doc.receiptId ? 'rcpt:' + doc.receiptId : null);
+          if (!key) return;
+          (groups[key] = groups[key] || []).push(doc);
+        });
+        Object.keys(groups).forEach(function (key) {
+          groups[key].sort(function (a, b) { return new Date(a.at) - new Date(b.at); })
+            .forEach(function (doc, i) { doc.num = i + 1; });
+        });
+      })();
       fg.discrepancies = discRows.map(Mappers.rowToDiscrepancy);
       fg.auditEvents = auditRows;
       /* Run 6: commercial layer joins the local mirror. */

@@ -330,6 +330,22 @@ async function main() {
   ok(bDoc && bDoc.imports && bDoc.imports.length === 1 && bDoc.imports[0].fields.job === 'J1',
     'hydrated document carries its confirmed import');
 
+  /* ===== M. shared-mode document numbering (regression: doc screen showed
+     "HISTORY CARD #undefined") ===== */
+  var bDocs = B.FG().documents.filter(function (d) { return d.rollId === '16628697' && d.kind === 'HISTORY_CARD'; });
+  ok(bDocs.length === 2, 'both history cards hydrate onto the roll');
+  var nums = bDocs.map(function (d) { return d.num; }).sort();
+  ok(nums[0] === 1 && nums[1] === 2, 'hydrated history cards get per-roll sequence numbers 1,2 (oldest first)');
+  ok(bDocs.every(function (d) { return typeof d.num === 'number'; }),
+    'no hydrated history card renders "HISTORY CARD #undefined"');
+  var rcptDocRow = { id: 'DTEST1', roll_id: null, receipt_id: 'RCV-1', warehouse_id: 'main',
+    storage_path: 'main/receipts/RCV-1/RD1.jpg', document_type: 'RECEIVING DOCUMENT',
+    employee_name: 'Ana', captured_at: new Date().toISOString() };
+  var rcptDoc = B.Mappers.rowToDocument(rcptDocRow);
+  ok(rcptDoc.kind === 'RECEIPT_DOCUMENT' && rcptDoc.source === 'PAPER CARD',
+    'rowToDocument maps receipt docs with accurate PAPER CARD source');
+  ok(bDoc.source === 'PAPER CARD', 'hydrated history cards carry the PAPER CARD source label');
+
   await harness.close();
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);
