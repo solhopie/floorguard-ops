@@ -647,8 +647,8 @@ function rpcSubmitReturn(b, role) {
   if (!r) return errObj('RETURN_NOT_FOUND', 'Return does not exist.');
   if (r.status === 'READY_FOR_DISPOSITION')
     return { ok: true, duplicate: true, return_id: r.id };
-  if (r.status !== 'PENDING')
-    return errObj('INVALID_STATUS', 'Only pending returns can be submitted.');
+  if (r.status !== 'PENDING' && r.status !== 'RECEIVED' && r.status !== 'INSPECTION')
+    return errObj('INVALID_STATUS', 'Only pending, received, or in-inspection returns can be submitted.');
   var items = Array.from(is.values()).filter(function (x) { return x.return_id === r.id; });
   if (!items.length) return errObj('NO_ITEMS', 'Add at least one returned item.');
   var bad = items.filter(function (x) {
@@ -971,6 +971,30 @@ function rpcResolveReturnException(b, role) {
   if (!stillOpen.length && r && r.status === 'EXCEPTION') { r.status = 'INSPECTION'; r.updated_at = now; }
   return { ok: true, duplicate: false, exception_id: e.id };
 }
+function rpcReserveRemnant(b, role) {
+  var _auth = requireRole(role, ['EMPLOYEE']);
+  if (_auth) return _auth;
+  var ms = state.tables.returned_remnants, as = state.tables.inventory_assignments;
+  var now = new Date().toISOString();
+  if (b.p_client_request_id) {
+    var dup = Array.from(as.values()).filter(function (x) { return x.client_request_id === b.p_client_request_id; })[0];
+    if (dup) return { ok: true, duplicate: true, assignment_id: dup.id };
+  }
+  var m = ms.get(b.p_remnant_id);
+  if (!m) return errObj('REMNANT_NOT_FOUND', 'Remnant does not exist.');
+  if (m.status !== 'AVAILABLE') return errObj('REMNANT_NOT_AVAILABLE', 'Remnant is ' + m.status + '.');
+  if (!b.p_reserved_in || b.p_reserved_in <= 0) return errObj('INVALID_QUANTITY', 'Reserved quantity must be greater than zero.');
+  if (b.p_reserved_in > m.length_in) return errObj('INSUFFICIENT_LENGTH', 'Remnant has ' + m.length_in + ' in.');
+  var aid = nid('A');
+  as.set(aid, { id: aid, work_order_id: b.p_work_order_id, line_id: b.p_line_id || null,
+    remnant_id: m.id, roll_id: null, warehouse_id: b.p_warehouse_id,
+    required_in: 0, reserved_in: b.p_reserved_in, status: 'RESERVED',
+    employee_name: b.p_employee_name || null, location_code: b.p_location_code || m.location_code || null,
+    mismatch_approved_by: b.p_mismatch_approved_by || null,
+    client_request_id: b.p_client_request_id || null, created_at: now });
+  m.status = 'ASSIGNED'; m.updated_at = now;
+  return { ok: true, duplicate: false, assignment_id: aid, remnant_number: m.remnant_number };
+}
 
   var server = http.createServer(function (req, res) {
     var parsed = url.parse(req.url, true);
@@ -1057,6 +1081,7 @@ function rpcResolveReturnException(b, role) {
         else if (rm[1] === 'cancel_return') out = rpcCancelReturn(body || {}, roleOf(req));
         else if (rm[1] === 'raise_return_exception') out = rpcRaiseReturnException(body || {}, roleOf(req));
         else if (rm[1] === 'resolve_return_exception') out = rpcResolveReturnException(body || {}, roleOf(req));
+        else if (rm[1] === 'reserve_remnant') out = rpcReserveRemnant(body || {}, roleOf(req));
         else return send(res, 404, { message: 'unknown rpc' });
         return send(res, 200, out);
       }

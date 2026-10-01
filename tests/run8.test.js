@@ -375,6 +375,38 @@ async function main() {
   var bdocs = await B.Repository.getDocumentsForReturn(sc.return.id);
   ok(bdocs.length >= 1, 'return document visible on second device');
 
+  /* ================= L2. shared: submit + remnant assignment ================= */
+  var scSub = await A.Repository.createReturn({ reason: 'OVERAGE', requestKey: 'shk-5' });
+  var scSubItem = await A.Repository.addReturnItem(scSub.return.id, { requestKey: 'shik-6' });
+  await A.Repository.measureReturnItem(scSubItem.item.id, 40);
+  await A.Repository.inspectReturnItem(scSubItem.item.id, 'GOOD');
+  var ssub = await A.Repository.submitReturn(scSub.return.id);
+  ok(ssub.ok, 'shared submitReturn succeeds');
+  var ssubDup = await A.Repository.submitReturn(scSub.return.id);
+  ok(ssubDup.ok && ssubDup.duplicate, 'shared submit retry is idempotent');
+  /* shared remnant assignment: new item on the submitted return */
+  var sci3 = await A.Repository.addReturnItem(scSub.return.id, { requestKey: 'shik-7' });
+  await A.Repository.measureReturnItem(sci3.item.id, 80);
+  await A.Repository.inspectReturnItem(sci3.item.id, 'GOOD');
+  var srem2 = await A.Repository.createReturnedRemnant(sci3.item.id, { lengthIn: 80, requestKey: 'shrk-1' });
+  ok(srem2.ok, 'shared remnant created for assignment');
+  await A.Repository.refresh();
+  var arems = await A.Repository.getReturnedRemnants(scSub.return.id);
+  var sremRow = arems.filter(function (m) { return m.id === srem2.remnant.id; })[0];
+  ok(sremRow && sremRow.status === 'AVAILABLE', 'shared remnant is AVAILABLE');
+  /* seed a WO on device A for the assignment */
+  A.FG().workOrders.push({ id: 'WO-SH1', number: 'WO-8001', opStatus: 'OPEN',
+    lines: [{ id: 'SHL1', style: srem2.remnant.style, color: srem2.remnant.color,
+      widthIn: srem2.remnant.widthIn, materialType: srem2.remnant.materialType, requiredIn: 60 }] });
+  var sash = await A.Repository.assignRemnantInventory({ remnantId: srem2.remnant.id,
+    woId: 'WO-SH1', lineId: 'SHL1', reservedIn: 50,
+    employee: 'alice@warehouse.com', clientRequestId: 'shak-1' });
+  ok(sash.ok && sash.remnantNumber === srem2.remnant.number, 'shared remnant assignment succeeds');
+  var sashDup = await A.Repository.assignRemnantInventory({ remnantId: srem2.remnant.id,
+    woId: 'WO-SH1', lineId: 'SHL1', reservedIn: 50,
+    employee: 'alice@warehouse.com', clientRequestId: 'shak-1' });
+  ok(sashDup.ok && sashDup.duplicate, 'shared remnant assignment retry is idempotent');
+
   /* ================= M. integrations ================= */
   var Z = makeDevice();
   setRole(Z, 'SUPERVISOR');

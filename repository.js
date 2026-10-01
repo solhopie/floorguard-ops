@@ -2788,6 +2788,7 @@ var SERVICE_METHODS = [
   'getReturnExceptions', 'getRemnantById',
   'createReturn', 'receiveReturn', 'addReturnItem', 'measureReturnItem',
   'inspectReturnItem', 'submitReturn', 'approveRestock', 'createReturnedRemnant',
+  'assignRemnantInventory',
   'quarantineReturnItem', 'scrapReturnItem', 'sendReturnToVendor', 'holdReturnItem',
   'completeReturn', 'cancelReturn', 'raiseReturnException', 'resolveReturnException',
   'uploadReturnDocument', 'getDocumentsForReturn'
