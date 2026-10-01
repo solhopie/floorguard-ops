@@ -205,6 +205,24 @@ async function main() {
   SR.inspectReturnItemLocal(srit.item.id, 'GOOD', {});
   var srsub = SR.submitReturnLocal(srr.return.id);
   ok(srsub.ok && srsub.return.status === 'READY_FOR_DISPOSITION', 'submit moves return to READY_FOR_DISPOSITION');
+  /* submit from RECEIVED status (receive first, then submit) */
+  var SR2 = makeDevice();
+  var srr2 = SR2.createReturnLocal({ reason: 'OVERAGE', requestKey: 'srrk-2' });
+  SR2.receiveReturnLocal(srr2.return.id, {});
+  var srit2 = SR2.addReturnItemLocal(srr2.return.id, { requestKey: 'srrik-2' });
+  SR2.measureReturnItemLocal(srit2.item.id, 50, {});
+  SR2.inspectReturnItemLocal(srit2.item.id, 'GOOD', {});
+  var srsub2 = SR2.submitReturnLocal(srr2.return.id);
+  ok(srsub2.ok && srsub2.return.status === 'READY_FOR_DISPOSITION', 'submit works from RECEIVED status');
+  /* submit idempotency: second submit returns duplicate */
+  var srsub3 = SR2.submitReturnLocal(srr2.return.id);
+  ok(srsub3.ok && srsub3.duplicate === true, 'resubmitting a submitted return is idempotent');
+  /* submit rejects COMPLETED returns */
+  var SR3 = makeDevice();
+  var srr3 = SR3.createReturnLocal({ reason: 'OVERAGE', requestKey: 'srrk-3' });
+  SR3.FG().returns.filter(function (x) { return x.id === srr3.return.id; })[0].status = 'COMPLETED';
+  var srsub4 = SR3.submitReturnLocal(srr3.return.id);
+  ok(!srsub4.ok && srsub4.err === 'INVALID STATUS', 'submit rejects COMPLETED returns');
 
   /* ================= F. quarantine excludes from assignment ================= */
   var W = makeDevice();

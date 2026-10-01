@@ -4212,6 +4212,12 @@ function submitReturnLocal(id) {
   if (pol) return pol;
   var r = returnById(id);
   if (!r) return { ok: false, err: 'RETURN NOT FOUND' };
+  if (r.status === RETURN_STATUS.READY_FOR_DISPOSITION)
+    return { ok: true, return: r, duplicate: true };
+  if (r.status !== RETURN_STATUS.PENDING && r.status !== RETURN_STATUS.RECEIVED &&
+      r.status !== RETURN_STATUS.INSPECTION)
+    return { ok: false, err: 'INVALID STATUS',
+      detail: 'Only pending, received, or in-inspection returns can be submitted.' };
   var items = returnItemsFor(id);
   if (!items.length) return { ok: false, err: 'NO ITEMS', detail: 'Add at least one returned item.' };
   var bad = items.filter(function (i) { return i.status !== RETURN_ITEM_STATUS.INSPECTED && i.status !== RETURN_ITEM_STATUS.MEASURED; });
@@ -6274,6 +6280,8 @@ Screens['return'] = function (param) {
     act += '<button class="btn btn-primary btn-huge" id="rt-receive">RECEIVE RETURN</button>';
   if ((r.status === RETURN_STATUS.RECEIVED || r.status === RETURN_STATUS.INSPECTION) && pol.canAddReturnItem)
     act += '<button class="btn btn-primary btn-huge" id="rt-add">+ SCAN / ADD ITEM</button>';
+  if ((r.status === RETURN_STATUS.RECEIVED || r.status === RETURN_STATUS.INSPECTION) && pol.canCreateReturn)
+    act += '<button class="btn btn-primary btn-huge" id="rt-submit">✓ SUBMIT FOR DISPOSITION</button>';
   if (pol.canDispositionReturn)
     act += '<button class="btn btn-huge" id="rt-doc">📄 ADD RETURN DOCUMENT</button>';
   if (r.status !== RETURN_STATUS.COMPLETED && r.status !== RETURN_STATUS.CANCELLED && pol.canDispositionReturn)
@@ -6309,6 +6317,12 @@ Screens['return'] = function (param) {
     $('#back').onclick = function () { go('returns'); };
     var rb = $('#rt-receive'); if (rb) rb.onclick = function () {
       run6Call(Repository.receiveReturn({ id: r.id }), function () { refresh(); }, function (e) { toast(e.message || 'Receive failed.'); });
+    };
+    var sb = $('#rt-submit'); if (sb) sb.onclick = function () {
+      showConfirm({ title: 'Submit for disposition?', body: 'All items must be measured or inspected.', confirm: 'SUBMIT',
+        onConfirm: function () {
+          run6Call(Repository.submitReturn(r.id), function () { refresh(); }, function (e) { toast(e.message || 'Submit failed.'); });
+        } });
     };
     var ab = $('#rt-add'); if (ab) ab.onclick = function () { go('return/item/new', r.id); };
     var db = $('#rt-doc'); if (db) db.onclick = function () { go('return/doc', r.id); };

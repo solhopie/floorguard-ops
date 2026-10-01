@@ -467,8 +467,12 @@ end;
 $$;
 
 -- ============ submit_return ============
--- Employee+. Transitions PENDING -> READY_FOR_DISPOSITION after verifying
--- every item has been measured and inspected. Idempotent via p_request_key.
+-- Employee+. Transitions PENDING/RECEIVED/INSPECTION -> READY_FOR_DISPOSITION
+-- after verifying every item has been measured or inspected.
+-- Idempotent: already-submitted returns return duplicate:true.
+-- p_request_key is accepted for client retry correlation; the status check
+-- itself provides the idempotency (a retry after success sees
+-- READY_FOR_DISPOSITION and returns duplicate:true).
 create or replace function public.submit_return(
   p_return_id text, p_employee text default null,
   p_request_key text default null)
@@ -490,8 +494,9 @@ begin
     return jsonb_build_object('ok', true, 'return_id', p_return_id,
       'status', 'READY_FOR_DISPOSITION', 'duplicate', true);
   end if;
-  if v_ret.status <> 'PENDING' then
-    return public.return_fail('INVALID_STATUS', 'Only pending returns can be submitted.');
+  if v_ret.status not in ('PENDING', 'RECEIVED', 'INSPECTION') then
+    return public.return_fail('INVALID_STATUS',
+      'Only pending, received, or in-inspection returns can be submitted.');
   end if;
   select count(*) into v_count from public.return_items where return_id = p_return_id;
   if v_count = 0 then
