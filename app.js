@@ -1511,7 +1511,10 @@ function showConfirm(opts) {
       '</div>';
     document.body.appendChild(wrap);
     function close(v) { wrap.remove(); resolve(v); }
-    wrap.querySelector('#mc-ok').onclick = function () { close(true); if (opts.onOk) opts.onOk(); };
+    var okCb = opts.onOk || opts.onConfirm;
+    var okLabel = opts.okLabel || opts.confirm || 'CONFIRM';
+    wrap.querySelector('#mc-ok').textContent = okLabel;
+    wrap.querySelector('#mc-ok').onclick = function () { close(true); if (okCb) okCb(); };
     wrap.querySelector('#mc-cancel').onclick = function () { close(false); };
     wrap.onclick = function (e) { if (e.target === wrap) close(false); };
   });
@@ -6597,7 +6600,7 @@ Screens['return/item/new'] = function (param) {
         returnedQuantity: qty > 0 ? qty : null,
         locationCode: $('#ni-loc').value || null,
         notes: $('#ni-notes').value || null
-      }), function (res) { go('return/item', res.id); }, function (e) { fail(e.message || 'Add failed.'); });
+      }), function (res) { go('return/item', res.item.id); }, function (e) { fail(e.message || 'Add failed.'); });
     };
   } };
 };
