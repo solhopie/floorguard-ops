@@ -631,6 +631,7 @@ var LocalRepo = {
   getWorkOrders: function () { return Promise.resolve(FG().workOrders || []); },
   getWorkOrder: function (id) { return Promise.resolve(woById(id)); },
   assignInventory: function (o) { return Promise.resolve(assignInventory(o)); },
+  assignRemnantInventory: function (o) { return Promise.resolve(assignRemnantInventoryLocal(o)); },
   releaseInventory: function (assignId, by) { return Promise.resolve(releaseAssignment(assignId, by)); },
   /* ---- Run 5: scheduled jobs / daily warehouse queue ---- */
   getScheduledJobs: function () { return Promise.resolve(scheduledJobs()); },
@@ -2193,6 +2194,24 @@ var SharedRepo = {
       return { ok: true, duplicate: !!r.duplicate, assignmentId: r.assignment_id, rollVersion: r.roll_version };
     });
   },
+  assignRemnantInventory: function (o) {
+    /* o: {workOrderId, lineId, remnantId, reservedIn, employee, warehouseId,
+           location, mismatchApprovedBy, clientRequestId} */
+    var self = this;
+    return self._rpc('reserve_remnant', {
+      p_work_order_id: o.workOrderId, p_line_id: o.lineId || null,
+      p_remnant_id: o.remnantId, p_reserved_in: Math.round(o.reservedIn),
+      p_employee_name: o.employee || null,
+      p_warehouse_id: o.warehouseId || self.wh(),
+      p_location_code: o.location || null,
+      p_client_request_id: o.clientRequestId || rid('AR'),
+      p_mismatch_approved_by: o.mismatchApprovedBy || null
+    }).then(function (res) {
+      var r = self._rpcResult(res);
+      return { ok: true, duplicate: !!r.duplicate, assignmentId: r.assignment_id,
+        remnantNumber: r.remnant_number };
+    });
+  },
   releaseInventory: function (assignId, by) {
     var self = this;
     return self._patch('inventory_assignments', 'id=eq.' + encodeURIComponent(assignId), {
@@ -2977,6 +2996,65 @@ var SharedFlow = {
     }
     DB.save();
     return { ok: true, rec: rec, compat: v.compat, over: v.over };
+  },
+
+  /* Run 8: shared-mode remnant assignment. Validates locally, then calls the
+     atomic reserve_remnant RPC, then applies the authoritative result. */
+  assignRemnantInventory: function (o) {
+    var v = (function () {
+      var rem = (FG().returnedRemnants || []).filter(function (x) { return x.id === o.remnantId; })[0];
+      if (!rem) return { ok: false, err: 'REMNANT NOT FOUND' };
+      if (rem.status !== 'AVAILABLE') return { ok: false, err: 'REMNANT NOT AVAILABLE' };
+      var wo = woById(o.woId);
+      if (!wo) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+      var line = lineById(wo, o.lineId);
+      if (!line) return { ok: false, err: 'MATERIAL LINE NOT FOUND' };
+      var reservedIn = Math.round(Number(o.reservedIn) || 0);
+      if (reservedIn <= 0) return { ok: false, err: 'RESERVED QUANTITY MUST BE GREATER THAN ZERO' };
+      if (reservedIn > rem.lengthIn) return { ok: false, err: 'INSUFFICIENT REMNANT LENGTH' };
+      var compat = checkCompatibility(rem, line);
+      var mismatchBy = o.mismatchApprovedBy || null;
+      if ((compat.verdict === 'MISMATCH' || compat.verdict === 'INCOMPLETE') &&
+          !(mismatchBy && isSupervisorRole(mismatchBy)))
+        return { ok: false, err: 'MATERIAL ' + compat.verdict + ' — SUPERVISOR APPROVAL REQUIRED', compat: compat };
+      return { ok: true, rem: rem, wo: wo, line: line, reservedIn: reservedIn,
+        compat: compat, mismatchBy: mismatchBy, employee: o.employee || DB.data.currentEmployee };
+    })();
+    if (!v.ok) return Promise.resolve(v);
+    var self = this;
+    return SharedRepo.assignRemnantInventory({
+      workOrderId: v.wo.id, lineId: v.line.id, remnantId: v.rem.id,
+      reservedIn: v.reservedIn, employee: v.employee,
+      warehouseId: Repository.config.warehouseId,
+      location: v.rem.locationCode || '',
+      mismatchApprovedBy: v.mismatchBy,
+      clientRequestId: o.clientRequestId || rid('AR')
+    }).then(function (r) {
+      var now = new Date().toISOString();
+      var rec = {
+        id: r.assignmentId, workOrderId: v.wo.id, lineId: v.line.id,
+        remnantId: v.rem.id, remnantNumber: r.remnantNumber || v.rem.number, rollId: null,
+        requiredIn: v.line.requiredIn, reservedIn: v.reservedIn,
+        employee: v.employee, warehouseId: Repository.config.warehouseId,
+        location: v.rem.locationCode || '',
+        at: now, status: 'RESERVED',
+        mismatchApprovedBy: v.mismatchBy,
+        rollVerifiedAt: null, rollVerifiedBy: null,
+        locationVerifiedAt: null, locationVerifiedBy: null,
+        releasedAt: null, releasedBy: null,
+        consumedAt: null, consumedBy: null, cutId: null, actualCutIn: null
+      };
+      FG().inventoryAssignments.push(rec);
+      v.rem.status = 'ASSIGNED'; v.rem.updatedAt = now;
+      logAssignEvent('REMNANT_ASSIGNED', {
+        user: v.employee, workOrderId: v.wo.id, lineId: v.line.id,
+        remnantId: v.rem.id, assignmentId: rec.id,
+        detail: 'Remnant ' + rec.remnantNumber + ' → ' + v.wo.number + ' line ' + v.line.id +
+          ', reserved ' + fmtLen(v.reservedIn)
+      });
+      DB.save();
+      return { ok: true, rec: rec, compat: v.compat, duplicate: !!r.duplicate };
+    });
   },
 
   releaseAssignment: function (assignId, by) {

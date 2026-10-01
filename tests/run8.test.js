@@ -412,6 +412,60 @@ async function main() {
   ok(!detailThrew2 && detailHtml2.indexOf(rr.return.number) !== -1,
     'return detail resolves by RET- number too');
 
+  /* ================= O. returned-remnant assignment to work orders ================= */
+  var RA = makeDevice();
+  setRole(RA, 'SUPERVISOR');
+  /* seed a work order with a material line matching the remnant */
+  var rawo = { id: 'WO-RA1', number: 'WO-9001', opStatus: 'OPEN',
+    lines: [{ id: 'L1', style: 'Shaw', color: 'Beige', widthIn: 144, materialType: 'Carpet', requiredIn: 200 }] };
+  RA.FG().workOrders.push(rawo);
+  var rar = RA.createReturnLocal({ reason: 'EXCESS MATERIAL', requestKey: 'rark-1' });
+  var rait = RA.addReturnItemLocal(rar.return.id, { style: 'Shaw', color: 'Beige', widthIn: 144,
+    materialType: 'Carpet', returnedQuantity: 120, requestKey: 'rarik-1' });
+  RA.measureReturnItemLocal(rait.item.id, 120, {});
+  RA.inspectReturnItemLocal(rait.item.id, 'GOOD', {});
+  var rarem = RA.createReturnedRemnantLocal(rait.item.id, { lengthIn: 120, requestKey: 'rarrk-1' });
+  ok(rarem.ok && rarem.remnant.status === 'AVAILABLE', 'remnant created AVAILABLE');
+  var raAssign = RA.assignRemnantInventoryLocal({ remnantId: rarem.remnant.id,
+    woId: 'WO-RA1', lineId: 'L1', reservedIn: 100, requestKey: 'raak-1' });
+  ok(raAssign.ok && raAssign.rec.remnantNumber === rarem.remnant.number,
+    'remnant assigns to WO line, REM- identity preserved');
+  ok(raAssign.rec.rollId === null && raAssign.rec.remnantId === rarem.remnant.id,
+    'assignment references remnant, not a roll');
+  ok(rarem.remnant.status === 'ASSIGNED', 'remnant moves AVAILABLE -> ASSIGNED');
+  /* double-assign rejected */
+  var raAssign2 = RA.assignRemnantInventoryLocal({ remnantId: rarem.remnant.id,
+    woId: 'WO-RA1', lineId: 'L1', reservedIn: 10, requestKey: 'raak-2' });
+  ok(!raAssign2.ok && raAssign2.err === 'REMNANT NOT AVAILABLE', 'assigned remnant cannot be assigned again');
+  /* over-length rejected */
+  RA.FG().returnedRemnants.push({ id: 'REM-TEST2', number: 'REM-100002', returnId: rar.return.id,
+    style: 'Shaw', color: 'Beige', widthIn: 144, materialType: 'Carpet',
+    lengthIn: 60, status: 'AVAILABLE' });
+  var raAssign3 = RA.assignRemnantInventoryLocal({ remnantId: 'REM-TEST2',
+    woId: 'WO-RA1', lineId: 'L1', reservedIn: 999, requestKey: 'raak-3' });
+  ok(!raAssign3.ok && raAssign3.err === 'INSUFFICIENT REMNANT LENGTH', 'cannot reserve more than remnant length');
+  /* mismatch requires supervisor approval */
+  RA.FG().workOrders.push({ id: 'WO-RA2', number: 'WO-9002', opStatus: 'OPEN',
+    lines: [{ id: 'L2', style: 'Mohawk', color: 'Gray', widthIn: 144, materialType: 'Carpet', requiredIn: 50 }] });
+  RA.FG().returnedRemnants.push({ id: 'REM-TEST3', number: 'REM-100003', returnId: rar.return.id,
+    style: 'Shaw', color: 'Beige', widthIn: 144, materialType: 'Carpet',
+    lengthIn: 60, status: 'AVAILABLE' });
+  var RA2 = makeDevice();
+  RA2.FG().workOrders = RA.FG().workOrders; RA2.FG().returnedRemnants = RA.FG().returnedRemnants;
+  RA2.DB.data.currentEmployee = 'emp@warehouse.com';
+  RA2.DB.data.employeeRoles = { 'emp@warehouse.com': 'EMPLOYEE' };
+  var raAssign4 = RA2.assignRemnantInventoryLocal({ remnantId: 'REM-TEST3',
+    woId: 'WO-RA2', lineId: 'L2', reservedIn: 50, requestKey: 'raak-4' });
+  ok(!raAssign4.ok && raAssign4.err.indexOf('SUPERVISOR APPROVAL REQUIRED') >= 0,
+    'material mismatch requires supervisor approval');
+  /* remnant/assign screen renders */
+  var scrThrew = null, scrHtml = '';
+  try {
+    var sout = RA.Screens['remnant/assign']('REM-TEST3');
+    scrHtml = (sout && sout.html) || '';
+  } catch (e) { scrThrew = e; }
+  ok(!scrThrew && scrHtml.indexOf('REM-100003') !== -1, 'remnant assign screen renders with REM- number');
+
   await harness.close();
   console.log('run8: ' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);

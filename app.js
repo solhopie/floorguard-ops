@@ -1113,6 +1113,66 @@ function assignInventoryAsync(o) {
   if (dataMode() === 'shared' && typeof SharedFlow !== 'undefined') return SharedFlow.assignInventory(o);
   return Promise.resolve(assignInventory(o));
 }
+/* Run 8: assign an AVAILABLE returned remnant to a work-order line.
+   The remnant keeps its independent REM- identity; the parent roll balance
+   is never touched. Quarantined/assigned/consumed remnants are excluded. */
+function assignRemnantInventoryLocal(o) {
+  o = o || {};
+  var rem = (FG().returnedRemnants || []).filter(function (x) { return x.id === o.remnantId; })[0];
+  if (!rem) return { ok: false, err: 'REMNANT NOT FOUND' };
+  if (rem.status !== 'AVAILABLE')
+    return { ok: false, err: 'REMNANT NOT AVAILABLE', detail: 'Remnant is ' + rem.status + ' — only AVAILABLE remnants can be assigned.' };
+  var wo = woById(o.woId);
+  if (!wo) return { ok: false, err: 'WORK ORDER NOT FOUND' };
+  var line = lineById(wo, o.lineId);
+  if (!line) return { ok: false, err: 'MATERIAL LINE NOT FOUND' };
+  var employee = o.employee || DB.data.currentEmployee;
+  if (!employee) return { ok: false, err: 'SIGN IN FIRST' };
+  var reservedIn = Math.round(Number(o.reservedIn) || 0);
+  if (reservedIn <= 0) return { ok: false, err: 'RESERVED QUANTITY MUST BE GREATER THAN ZERO' };
+  if (reservedIn > rem.lengthIn)
+    return { ok: false, err: 'INSUFFICIENT REMNANT LENGTH', detail: 'Remnant has ' + fmtLen(rem.lengthIn) + '; cannot reserve ' + fmtLen(reservedIn) + '.' };
+  var compat = checkCompatibility(rem, line);
+  var mismatchBy = o.mismatchApprovedBy || null;
+  if ((compat.verdict === 'MISMATCH' || compat.verdict === 'INCOMPLETE') &&
+      !(mismatchBy && isSupervisorRole(mismatchBy)))
+    return { ok: false, err: 'MATERIAL ' + compat.verdict + ' — SUPERVISOR APPROVAL REQUIRED', compat: compat };
+  return retIdem(o.requestKey, function () {
+    var now = new Date().toISOString();
+    var rec = {
+      id: aiSeq(), workOrderId: wo.id, lineId: line.id,
+      remnantId: rem.id, remnantNumber: rem.number, rollId: null,
+      requiredIn: line.requiredIn, reservedIn: reservedIn,
+      employee: employee, warehouseId: DB.data.currentWarehouse,
+      location: rem.locationCode || '',
+      at: now, status: AI_STATUS.RESERVED,
+      mismatchApprovedBy: mismatchBy,
+      rollVerifiedAt: null, rollVerifiedBy: null,
+      locationVerifiedAt: null, locationVerifiedBy: null,
+      releasedAt: null, releasedBy: null,
+      consumedAt: null, consumedBy: null, cutId: null, actualCutIn: null,
+      requestKey: o.requestKey || null
+    };
+    FG().inventoryAssignments.push(rec);
+    rem.status = 'ASSIGNED'; rem.updatedAt = now;
+    logAssignEvent('REMNANT_ASSIGNED', {
+      user: employee, workOrderId: wo.id, lineId: line.id, remnantId: rem.id, assignmentId: rec.id,
+      detail: 'Remnant ' + rem.number + ' → ' + wo.number + ' line ' + line.id +
+        ', reserved ' + fmtLen(reservedIn) + (mismatchBy ? ' (material override: ' + mismatchBy + ')' : '')
+    });
+    var r = returnById(rem.returnId);
+    logReturnEvent('RETURN_REMNANT_ASSIGNED', { returnId: rem.returnId, returnNumber: r && r.number,
+      workOrderId: wo.id, salesOrderId: r && r.salesOrderId,
+      detail: 'Remnant ' + rem.number + ' assigned to ' + wo.number + '. Parent roll untouched.' });
+    if (wo.opStatus === 'OPEN') wo.opStatus = 'IN_PROGRESS';
+    DB.save();
+    return { ok: true, duplicate: false, rec: rec, compat: compat };
+  });
+}
+function assignRemnantInventoryAsync(o) {
+  if (dataMode() === 'shared' && typeof SharedFlow !== 'undefined') return SharedFlow.assignRemnantInventory(o);
+  return Promise.resolve(assignRemnantInventoryLocal(o));
+}
 function releaseAssignmentAsync(assignId, by) {
   if (dataMode() === 'shared' && typeof SharedFlow !== 'undefined') return SharedFlow.releaseAssignment(assignId, by);
   return Promise.resolve(releaseAssignment(assignId, by));
@@ -6062,7 +6122,7 @@ function raiseExceptionDlg(r) {
 }
 
 function returnTabs() {
-  return ['PENDING', 'INSPECTION', 'READY FOR DISPOSITION', 'COMPLETED', 'EXCEPTIONS'];
+  return ['PENDING', 'INSPECTION', 'READY FOR DISPOSITION', 'COMPLETED', 'EXCEPTIONS', 'REMNANTS'];
 }
 function returnsByTab(tab) {
   var all = FG().returns || [];
@@ -6097,12 +6157,32 @@ Screens['returns'] = function (param) {
   if (returnTabs().indexOf(tab) < 0) tab = 'PENDING';
   var pol = returnPolicy();
   var tabs = returnTabs().map(function (t) {
-    var n = returnsByTab(t).length;
+    var n = (t === 'REMNANTS') ? (FG().returnedRemnants || []).length : returnsByTab(t).length;
     return '<button class="fchip' + (t === tab ? ' on' : '') + '" data-tab="' + t + '">' + t +
       ' <b class="badge">' + n + '</b></button>';
   }).join('');
+  function remnantCardHtml(m) {
+    var r = m.returnId ? returnById(m.returnId) : null;
+    return '<div class="card"><div class="rhead"><b class="mono">' + esc(m.number) + '</b>' +
+      '<span class="chip ' + (m.status === 'AVAILABLE' ? 'chip-green' : 'chip-amber') + '">' + esc(m.status) + '</span></div>' +
+      '<div class="sub">' + esc([m.style, m.color].filter(Boolean).join(' / ')) +
+      ' &middot; <b class="num">' + fmtLen(m.lengthIn) + '</b>' +
+      (m.locationCode ? ' &middot; loc <b class="mono">' + esc(m.locationCode) + '</b>' : '') +
+      (r ? ' &middot; from ' + esc(r.number) : '') + '</div>' +
+      (m.status === 'AVAILABLE' && pol.canCreateReturn ?
+        '<button class="btn btn-primary" data-remnant-assign="' + esc(m.id) + '">ASSIGN TO WORK ORDER</button>' : '') +
+      '</div>';
+  }
   function cardHtml() {
     var q = (RT8.q || '').toUpperCase();
+    if (tab === 'REMNANTS') {
+      var mlist = (FG().returnedRemnants || []).filter(function (m) {
+        if (!q) return true;
+        return (m.number + ' ' + (m.style || '') + ' ' + (m.color || '') + ' ' + (m.status || ''))
+          .toUpperCase().indexOf(q) >= 0;
+      });
+      return mlist.length ? mlist.map(remnantCardHtml).join('') : '<p class="hint">No remnants here.</p>';
+    }
     var list = returnsByTab(tab).filter(function (r) {
       if (!q) return true;
       var items = returnItemsFor(r.id);
@@ -6140,6 +6220,9 @@ Screens['returns'] = function (param) {
     function wireCards() {
       Array.prototype.forEach.call(document.querySelectorAll('[data-return]'), function (b) {
         b.onclick = function () { go('return', b.getAttribute('data-return')); };
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-remnant-assign]'), function (b) {
+        b.onclick = function () { go('remnant/assign', b.getAttribute('data-remnant-assign')); };
       });
     }
     wireCards();
@@ -6357,6 +6440,95 @@ Screens['return'] = function (param) {
       };
     });
     function refresh() { go('return', r.id); }
+  } };
+};
+
+/* ---------- /remnant/assign/:remnantId — assign an AVAILABLE returned remnant to a WO line ---------- */
+Screens['remnant/assign'] = function (param) {
+  var m = (FG().returnedRemnants || []).filter(function (x) { return x.id === param; })[0];
+  if (!m) return { html: '<div class="screen">' + pageHead('Assign remnant', 'Returns') +
+    '<div class="card"><p class="hint">Remnant not found.</p></div></div>' };
+  if (m.status !== 'AVAILABLE') return { html: '<div class="screen">' + pageHead(esc(m.number), 'Returns') +
+    '<div class="card"><p class="hint">Remnant is ' + esc(m.status) + ' — only AVAILABLE remnants can be assigned.</p></div></div>' };
+  var pol = returnPolicy();
+  if (!pol.canCreateReturn) return { html: '<div class="screen">' + pageHead(esc(m.number), 'Returns') +
+    '<div class="card"><p class="hint">Not authorized to assign inventory.</p></div></div>' };
+  var wos = (FG().workOrders || []).filter(function (w) { return w.opStatus !== 'COMPLETED' && w.opStatus !== 'CANCELLED'; });
+  var woOpts = wos.map(function (w) {
+    return '<option value="' + esc(w.id) + '">' + esc(w.number || w.id) + '</option>';
+  }).join('');
+  var html =
+    '<div class="screen">' +
+    '<button class="backbtn" id="back">← REMNANTS</button>' +
+    pageHead('🏷️ ' + esc(m.number), 'Assign returned remnant') +
+    '<div class="card"><div class="rhead"><b class="mono">' + esc(m.number) + '</b> <span class="chip chip-green">AVAILABLE</span></div>' +
+    '<div class="kv"><span>MATERIAL</span><b>' + esc([m.style, m.color].filter(Boolean).join(' / ')) + '</b></div>' +
+    '<div class="kv"><span>LENGTH</span><b class="num">' + fmtLen(m.lengthIn) + '</b></div>' +
+    (m.widthIn ? '<div class="kv"><span>WIDTH</span><b class="num">' + m.widthIn + ' in</b></div>' : '') +
+    (m.locationCode ? '<div class="kv"><span>LOCATION</span><b class="mono">' + esc(m.locationCode) + '</b></div>' : '') +
+    '<p class="hint">Independent inventory — assigning never touches the parent roll balance.</p></div>' +
+    '<div class="card"><div class="field"><label class="label">WORK ORDER</label>' +
+    '<select class="input" id="ra-wo">' + woOpts + '</select></div>' +
+    '<div class="field"><label class="label">MATERIAL LINE</label>' +
+    '<select class="input" id="ra-line"></select></div>' +
+    '<div id="ra-compat"></div>' +
+    '<div class="field"><label class="label">RESERVE (INCHES)</label>' +
+    '<input class="input num" id="ra-qty" inputmode="numeric" value="' + m.lengthIn + '"></div>' +
+    '<p class="hint" id="ra-err" hidden></p>' +
+    '<button class="btn btn-primary btn-huge" id="ra-go">ASSIGN REMNANT</button></div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    $('#back').onclick = function () { go('returns', 'REMNANTS'); };
+    var woSel = $('#ra-wo'), lineSel = $('#ra-line'), compatEl = $('#ra-compat'),
+        qtyEl = $('#ra-qty'), errEl = $('#ra-err');
+    function linesFor(woId) {
+      var w = woById(woId);
+      return w ? ((w.materialLines || w.lines || []).filter(function (l) { return l; })) : [];
+    }
+    function refreshLines() {
+      var ls = linesFor(woSel.value);
+      lineSel.innerHTML = ls.map(function (l, i) {
+        return '<option value="' + esc(l.id || i) + '">' + esc(l.style || '') + ' / ' + esc(l.color || '') +
+          ' — need ' + fmtLen(l.requiredIn) + '</option>';
+      }).join('');
+      refreshCompat();
+    }
+    function refreshCompat() {
+      var w = woById(woSel.value), ls = linesFor(woSel.value);
+      var line = ls.filter(function (l, i) { return String(l.id || i) === lineSel.value; })[0];
+      if (!w || !line) { compatEl.innerHTML = ''; return; }
+      var c = checkCompatibility(m, line);
+      var cls = c.verdict === 'MATCH' ? 'chip-green' : 'chip-amber';
+      compatEl.innerHTML = '<div class="kv"><span>COMPATIBILITY</span><b><span class="chip ' + cls + '">' +
+        esc(c.verdict) + '</span></b></div>' +
+        (c.mismatches.length ? '<p class="hint">Mismatches: ' +
+          esc(c.mismatches.map(function (x) { return x.field; }).join(', ')) +
+          ' — supervisor approval required.</p>' : '');
+    }
+    woSel.onchange = refreshLines;
+    lineSel.onchange = refreshCompat;
+    refreshLines();
+    $('#ra-go').onclick = function () {
+      errEl.hidden = true;
+      var w = woById(woSel.value), ls = linesFor(woSel.value);
+      var line = ls.filter(function (l, i) { return String(l.id || i) === lineSel.value; })[0];
+      if (!w || !line) { errEl.textContent = 'Pick a work order and material line.'; errEl.hidden = false; return; }
+      showConfirm({ title: 'Assign ' + m.number + '?',
+        body: 'Reserve <b>' + fmtLen(qtyEl.value) + '</b> of ' + esc(m.number) + ' for ' + esc(w.number) + '.',
+        confirm: 'ASSIGN',
+        onConfirm: function () {
+          run6Call(assignRemnantInventoryAsync({
+            remnantId: m.id, woId: w.id, lineId: line.id || null,
+            reservedIn: Math.round(Number(qtyEl.value) || 0),
+            employee: DB.data.currentEmployee, requestKey: rid('RA')
+          }), function (res) {
+            good(); toast('Remnant ' + m.number + ' assigned to ' + w.number + '.');
+            go('returns', 'REMNANTS');
+          }, function (e) {
+            bad(); errEl.textContent = (e && e.message) || 'Assignment failed.'; errEl.hidden = false;
+          });
+        } });
+    };
   } };
 };
 
@@ -7057,24 +7229,12 @@ Screens['assign-inventory/assign'] = function (param) {
       Array.prototype.forEach.call(document.querySelectorAll('[data-rollpick]'), function (b) {
         b.onclick = function () { AI.rollId = b.getAttribute('data-rollpick'); AI.phase = 'roll'; renderBody(); };
       });
-      /* Run 8: tapping a returned remnant shows its detail; it is available
-         inventory with its own REM-# identity. */
+      /* Run 8: tapping a returned remnant assigns it to this work order. */
       Array.prototype.forEach.call(document.querySelectorAll('[data-remnantpick]'), function (b) {
         b.onclick = function () {
           var m = (FG().returnedRemnants || []).filter(function (x) { return x.id === b.getAttribute('data-remnantpick'); })[0];
           if (!m) return;
-          showConfirm({
-            title: 'Returned remnant ' + m.number,
-            body: '<div class="kv"><span>LENGTH</span><b>' + fmtLen(m.lengthIn) + '</b></div>' +
-              '<div class="kv"><span>MATERIAL</span><b>' + esc([m.style, m.color].filter(Boolean).join(' / ')) + '</b></div>' +
-              (m.locationCode ? '<div class="kv"><span>LOCATION</span><b>' + esc(m.locationCode) + '</b></div>' : '') +
-              '<p class="hint">This remnant is independently traceable inventory. ' +
-              'It can be assigned to a work order from the Returns hub.</p>',
-            confirm: 'VIEW IN RETURNS',
-            cancel: 'CLOSE'
-          }).then(function (ok) {
-            if (ok) go('returns');
-          });
+          go('remnant/assign', m.id);
         };
       });
     }

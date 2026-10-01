@@ -1273,3 +1273,111 @@ grant execute on function public.complete_return(text,text,text) to authenticate
 grant execute on function public.cancel_return(text,text,text) to authenticated;
 grant execute on function public.raise_return_exception(text,text,text,text,text) to authenticated;
 grant execute on function public.resolve_return_exception(text,text,text) to authenticated;
+
+-- ============ remnant assignment: inventory_assignments gains remnant_id ============
+-- A remnant assignment references the returned remnant (independent REM-
+-- identity); roll_id stays null. Exactly one of the two must be set.
+alter table public.inventory_assignments
+  add column if not exists remnant_id text references public.returned_remnants(id);
+alter table public.inventory_assignments
+  alter column roll_id drop not null;
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'assignments_roll_or_remnant') then
+    alter table public.inventory_assignments
+      add constraint assignments_roll_or_remnant
+      check ((roll_id is not null)::int + (remnant_id is not null)::int = 1);
+  end if;
+end $$;
+create index if not exists assignments_remnant_idx on public.inventory_assignments (remnant_id);
+
+-- ============ reserve_remnant ============
+-- Employee+. Reserves an AVAILABLE returned remnant for a work-order line.
+-- Mirrors reserve_inventory but for independent remnant stock: the remnant
+-- keeps its REM- identity, the parent roll balance is never touched, and
+-- the remnant moves AVAILABLE -> ASSIGNED atomically. Idempotent via
+-- p_client_request_id.
+create or replace function public.reserve_remnant(
+  p_work_order_id text,
+  p_line_id text,
+  p_remnant_id text,
+  p_reserved_in integer,
+  p_employee_name text,
+  p_warehouse_id text,
+  p_location_code text default null,
+  p_client_request_id text default null,
+  p_mismatch_approved_by text default null
+)
+returns jsonb language plpgsql security definer
+set search_path = public as $$
+declare
+  v_caller public.users;
+  v_rem public.returned_remnants;
+  v_assign_id text;
+  v_existing public.inventory_assignments;
+begin
+  v_caller := public.return_caller();
+  if v_caller is null then
+    return public.return_fail('NOT_AUTHENTICATED', 'Sign in is required.');
+  end if;
+  if not public.in_warehouse(p_warehouse_id) then
+    return public.return_fail('NOT_AUTHORIZED', 'Not a member of this warehouse.');
+  end if;
+
+  if p_client_request_id is not null then
+    select * into v_existing from public.inventory_assignments
+      where client_request_id = p_client_request_id limit 1;
+    if found then
+      return jsonb_build_object('ok', true, 'duplicate', true, 'assignment_id', v_existing.id);
+    end if;
+  end if;
+
+  select * into v_rem from public.returned_remnants where id = p_remnant_id for update;
+  if not found then
+    return public.return_fail('REMNANT_NOT_FOUND', 'Remnant does not exist.');
+  end if;
+  if v_rem.warehouse_id <> p_warehouse_id then
+    return public.return_fail('NOT_AUTHORIZED', 'Remnant is not in this warehouse.');
+  end if;
+  if v_rem.status <> 'AVAILABLE' then
+    return public.return_fail('REMNANT_NOT_AVAILABLE',
+      'Remnant is ' || v_rem.status || ' (only AVAILABLE remnants can be assigned).');
+  end if;
+  if p_reserved_in is null or p_reserved_in <= 0 then
+    return public.return_fail('INVALID_QUANTITY', 'Reserved quantity must be greater than zero.');
+  end if;
+  if p_reserved_in > v_rem.length_in then
+    return public.return_fail('INSUFFICIENT_LENGTH',
+      'Remnant has ' || v_rem.length_in || ' in; cannot reserve ' || p_reserved_in || ' in.');
+  end if;
+
+  v_assign_id := 'A' || substring(md5(random()::text || clock_timestamp()::text), 1, 12);
+
+  insert into public.inventory_assignments
+    (id, work_order_id, line_id, remnant_id, warehouse_id, required_in, reserved_in,
+     status, employee_id, employee_name, location_code,
+     mismatch_approved_by, client_request_id)
+  select v_assign_id, p_work_order_id, p_line_id, p_remnant_id, p_warehouse_id,
+         coalesce((select required_in from public.work_order_material_lines where id = p_line_id), 0),
+         p_reserved_in, 'RESERVED', v_caller.id, p_employee_name,
+         coalesce(p_location_code, v_rem.location_code),
+         p_mismatch_approved_by, p_client_request_id;
+
+  update public.returned_remnants
+     set status = 'ASSIGNED', updated_at = now()
+   where id = p_remnant_id;
+
+  insert into public.audit_events
+    (id, warehouse_id, action, entity_type, entity_id, user_name, new_value)
+  values
+    ('A' || substring(md5(random()::text), 1, 12), p_warehouse_id,
+     'REMNANT_ASSIGNED', 'inventory_assignment', v_assign_id, coalesce(p_employee_name, v_caller.id),
+     jsonb_build_object('remnant_id', p_remnant_id, 'remnant_number', v_rem.remnant_number,
+       'work_order_id', p_work_order_id, 'reserved_in', p_reserved_in,
+       'detail', 'Remnant ' || v_rem.remnant_number || ' reserved for work order. Parent roll untouched.'));
+
+  return jsonb_build_object('ok', true, 'duplicate', false,
+    'assignment_id', v_assign_id, 'remnant_number', v_rem.remnant_number);
+end;
+$$;
+grant execute on function public.reserve_remnant(text,text,text,integer,text,text,text,text,text) to authenticated;
