@@ -1391,6 +1391,15 @@ if (typeof window !== 'undefined') {
   window.addEventListener('offline', updateConn);
 }
 function render() {
+  try {
+    renderInner();
+  } catch (e) {
+    var v = document.getElementById('view');
+    if (v) v.innerHTML = '<div class="screen"><div class="card"><h3>Render error</h3><p class="hint">' +
+      esc(String((e && e.message) || e)) + '</p></div></div>';
+  }
+}
+function renderInner() {
   closeDrawer();
   /* Never leave the camera running between screens. */
   if (typeof Scanner !== 'undefined' && Scanner.stop) Scanner.stop();
