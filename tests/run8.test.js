@@ -373,6 +373,27 @@ async function main() {
   var ledgerActs = (Z.FG().returnActivity || []).filter(function (a) { return a.rollId === '16628697'; });
   ok(ledgerActs.length >= 1, 'restock writes roll-ledger return activity');
 
+  /* ================= N. regression: return detail screen renders ================= */
+  var R = makeDevice();
+  setRole(R, 'SUPERVISOR');
+  var rr = R.createReturnLocal({ reason: 'EXCESS MATERIAL', requestKey: 'reg-1' });
+  ok(rr.ok, 'regression return created');
+  var detailThrew = null, detailHtml = '';
+  try {
+    var out = R.Screens['return'](rr.return.id);
+    detailHtml = (out && out.html) || '';
+  } catch (e) { detailThrew = e; }
+  ok(!detailThrew, 'return detail screen renders without throwing (returnActivityFor defined)');
+  ok(detailHtml.indexOf(rr.return.number) !== -1, 'return detail HTML contains the RET- number');
+  /* by number lookup path as well */
+  var detailThrew2 = null, detailHtml2 = '';
+  try {
+    var out2 = R.Screens['return'](rr.return.number);
+    detailHtml2 = (out2 && out2.html) || '';
+  } catch (e) { detailThrew2 = e; }
+  ok(!detailThrew2 && detailHtml2.indexOf(rr.return.number) !== -1,
+    'return detail resolves by RET- number too');
+
   await harness.close();
   console.log('run8: ' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);
