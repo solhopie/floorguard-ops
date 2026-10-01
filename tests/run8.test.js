@@ -530,6 +530,10 @@ async function main() {
   ok(rcInsp.ok && rcInsp.item.condition === 'GOOD', 'facade inspectReturnItem({itemId,...}) works');
   var rcSub = await RC.Repository.submitReturn({ id: rcr.return.id });
   ok(rcSub.ok && rcSub.return.status === 'READY_FOR_DISPOSITION', 'facade submitReturn({id}) works');
+  /* P6: returnsByTab matches space-separated tab keys to underscore statuses */
+  var rdyList = RC.returnsByTab('READY FOR DISPOSITION');
+  ok(rdyList.some(function (r) { return r.id === rcr.return.id; }),
+    'returnsByTab("READY FOR DISPOSITION") finds READY_FOR_DISPOSITION returns');
 
   await harness.close();
   console.log('run8: ' + passed + ' passed, ' + failed + ' failed');

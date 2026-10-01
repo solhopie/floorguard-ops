@@ -6142,7 +6142,9 @@ function returnsByTab(tab) {
       return r.status === RETURN_STATUS.EXCEPTION ||
         returnExceptionsFor(r.id).some(function (e) { return e.status === 'OPEN'; });
     });
-  return all.filter(function (r) { return r.status === tab; });
+  /* Tab keys use spaces ("READY FOR DISPOSITION"); stored statuses use underscores. */
+  var statusKey = tab.replace(/ /g, '_');
+  return all.filter(function (r) { return r.status === statusKey; });
 }
 function returnCardHtml(r) {
   var items = returnItemsFor(r.id);
