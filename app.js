@@ -6016,6 +6016,9 @@ Screens['receipt/doc/review'] = function () {
 /* ================= Run 8: Returns UI ================= */
 var RT8 = { q: '' };
 
+function returnActivityFor(returnId) {
+  return (FG().returnActivity || []).filter(function (e) { return e.returnId === returnId; });
+}
 function returnTimelineHtml(returnId) {
   var evs = returnActivityFor(returnId);
   if (!evs.length) return '<p class="hint">No activity yet.</p>';
