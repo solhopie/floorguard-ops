@@ -498,6 +498,18 @@ async function main() {
   } catch (e) { scrThrew = e; }
   ok(!scrThrew && scrHtml.indexOf('REM-100003') !== -1, 'remnant assign screen renders with REM- number');
 
+  /* ================= P. regression: UI-facing bug fixes ================= */
+  /* P1: Repository.receiveReturn accepts { id } object (UI passes object, not string) */
+  var RB = makeDevice();
+  setRole(RB, 'SUPERVISOR');
+  var rbr = RB.createReturnLocal({ reason: 'EXCESS MATERIAL', requestKey: 'rbrk-1' });
+  var rbRecv = await RB.Repository.receiveReturn({ id: rbr.return.id });
+  ok(rbRecv.ok && rbRecv.return.status === 'RECEIVED', 'receiveReturn accepts { id } object');
+  /* P2: DB.SCHEMA matches seed schema so data persists across reload */
+  ok(RB.DB.SCHEMA === 7, 'DB.SCHEMA is 7 (current)');
+  var seedData = RB.DB.seed();
+  ok(seedData.schema === 7, 'seed() writes schema 7');
+
   await harness.close();
   console.log('run8: ' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);

@@ -693,7 +693,11 @@ var LocalRepo = {
   getAvailableRemnants: function () { return Promise.resolve(availableRemnants()); },
   getReturnExceptions: function (returnId) { return Promise.resolve(returnExceptionsFor(returnId)); },
   createReturn: function (o) { return Promise.resolve(createReturnLocal(o)); },
-  receiveReturn: function (id) { return Promise.resolve(receiveReturnLocal(id)); },
+  receiveReturn: function (id) {
+    /* Accept id string or { id } object (UI passes { id }). */
+    var rid = (id && typeof id === 'object') ? id.id : id;
+    return Promise.resolve(receiveReturnLocal(rid));
+  },
   addReturnItem: function (returnId, it) { return Promise.resolve(addReturnItemLocal(returnId, it)); },
   measureReturnItem: function (itemId, inches) { return Promise.resolve(measureReturnItemLocal(itemId, inches)); },
   inspectReturnItem: function (itemId, condition, notes) { return Promise.resolve(inspectReturnItemLocal(itemId, condition, notes)); },
@@ -1791,15 +1795,17 @@ var SharedRepo = {
   },
   receiveReturn: function (id) {
     var self = this;
+    /* Accept id string or { id } object (UI passes { id }). */
+    var rid = (id && typeof id === 'object') ? id.id : id;
     self._requireOnline('OFFLINE — RETURN NOT RECEIVED');
     self._requireOrderPolicy(returnPolicy().canReceiveReturn, 'Not authorized to receive returns.');
     return self._rpc('receive_return', {
-        p_return_id: id, p_employee: DB.data.currentEmployee, p_request_key: rid('K')
+        p_return_id: rid, p_employee: DB.data.currentEmployee, p_request_key: rid('K')
       })
       .then(self._rpcResult)
       .then(function (res) {
         return self._refreshReturns().then(function () {
-          return { ok: true, return: returnById(id), duplicate: !!res.duplicate };
+          return { ok: true, return: returnById(rid), duplicate: !!res.duplicate };
         });
       });
   },

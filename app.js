@@ -33,7 +33,7 @@ var APP_VERSION = '0.8.0';
    through DB.ns('<module-key>'). */
 var DB = {
   KEY: 'floorguard_ops_v1',
-  SCHEMA: 6,
+  SCHEMA: 7,
   data: null,
   seed: function () {
     return {
@@ -55,6 +55,11 @@ var DB = {
       var raw = localStorage.getItem(this.KEY);
       if (raw) {
         var d = JSON.parse(raw);
+        if (d && d.schema === 7) {
+          /* Current schema: use as-is. */
+          this.data = d;
+          return;
+        }
         if (d && d.schema === 6) {
           /* v6 -> v7: Run 8. Return collections. No existing data is touched. */
           d.schema = 7;
