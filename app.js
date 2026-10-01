@@ -4074,9 +4074,12 @@ function returnPolicy() {
     canReceiveReturn: !!role,
     canMeasureReturn: !!role,
     canInspectReturn: !!role,
+    canAddReturnItem: !!role,    /* add items to a received return */
     canApproveRestock: sup,      /* approve restock, create/approve usable remnant */
     canCreateRemnant: sup,
     canQuarantine: sup,
+    canDispositionReturn: sup,   /* record dispositions on items */
+    canCompleteReturn: sup,      /* complete a return */
     canResolveReturnExceptions: sup,
     canScrap: mgr,               /* scrap authorization */
     canCancelReturn: mgr,
@@ -6127,7 +6130,7 @@ function raiseExceptionDlg(r) {
 }
 
 function returnTabs() {
-  return ['PENDING', 'INSPECTION', 'READY FOR DISPOSITION', 'COMPLETED', 'EXCEPTIONS', 'REMNANTS'];
+  return ['PENDING', 'RECEIVED', 'INSPECTION', 'READY FOR DISPOSITION', 'COMPLETED', 'EXCEPTIONS', 'REMNANTS'];
 }
 function returnsByTab(tab) {
   var all = FG().returns || [];

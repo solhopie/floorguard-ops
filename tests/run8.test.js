@@ -509,6 +509,13 @@ async function main() {
   ok(RB.DB.SCHEMA === 7, 'DB.SCHEMA is 7 (current)');
   var seedData = RB.DB.seed();
   ok(seedData.schema === 7, 'seed() writes schema 7');
+  /* P3: returnPolicy defines all UI-gated permissions */
+  var pol = RB.returnPolicy();
+  ok(pol.canAddReturnItem === true, 'returnPolicy defines canAddReturnItem');
+  ok(pol.canDispositionReturn === true, 'returnPolicy defines canDispositionReturn');
+  ok(pol.canCompleteReturn === true, 'returnPolicy defines canCompleteReturn');
+  /* P4: RECEIVED tab exists so received returns are visible */
+  ok(RB.returnTabs().indexOf('RECEIVED') >= 0, 'returnTabs includes RECEIVED');
 
   await harness.close();
   console.log('run8: ' + passed + ' passed, ' + failed + ' failed');
