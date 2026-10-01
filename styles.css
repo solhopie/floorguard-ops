@@ -283,8 +283,12 @@ label.f { display: block; font-weight: 700; margin: 6px 0 8px; }
   background: var(--panel-deep); color: var(--text);
   border: 2px solid var(--line); border-radius: var(--radius);
 }
-.input:focus { border-color: var(--accent); outline: none; }
+.input:focus { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
 select.input { appearance: auto; }
+/* Visible keyboard focus for all interactive elements (Run 9 a11y) */
+.btn:focus-visible, button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+  outline: 3px solid var(--accent); outline-offset: 2px;
+}
 
 /* key-value cards */
 .kv { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
@@ -475,3 +479,38 @@ select.input { appearance: auto; }
 .tl-row { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .tl-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
   margin-top: 6px; flex-shrink: 0; }
+
+/* ======================================================================
+   RUN 9: narrow-phone hardening (320px – 430px).
+   Goals: no horizontal overflow, tappable targets, stacked actions,
+   camera and tables usable on the smallest warehouse phones.
+   ====================================================================== */
+@media (max-width: 430px) {
+  .screen { overflow-x: hidden; padding-left: 12px; padding-right: 12px; }
+  img, video, table { max-width: 100%; }
+  /* Wide report tables scroll inside their card instead of breaking layout. */
+  .card { overflow-x: auto; }
+  .rtable, .ptable { font-size: .8rem; }
+  /* Action rows stack so buttons stay full-width and tappable. */
+  .btn-row { flex-direction: column; }
+  .btn-row .btn { width: 100%; }
+  .btn, .input, select.input, textarea.input { min-height: 48px; }
+  .btn-huge { min-height: 64px; }
+  /* Key/value rows wrap instead of squeezing. */
+  .kv { flex-wrap: wrap; row-gap: 2px; }
+  .kv .v { text-align: left; }
+  /* Modal fits the smallest screens. */
+  .modal-wrap { padding: 12px; }
+  .modal { max-width: 100%; }
+  /* Camera box shorter on small phones; result text stays readable. */
+  .cambox { min-height: 200px; }
+  .mono { word-break: break-all; }
+  /* Step header scales down. */
+  .step-head h1 { font-size: 1.4rem; }
+}
+/* 320px floor: the absolute smallest target — tighten gaps, keep 48px targets. */
+@media (max-width: 340px) {
+  .screen { padding-left: 8px; padding-right: 8px; }
+  .card { padding: 12px; }
+  .chip { padding: 4px 10px; font-size: .85rem; }
+}

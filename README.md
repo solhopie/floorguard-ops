@@ -89,6 +89,14 @@ python3 -m http.server 8080
 
 ```
 node --check app.js
-node tests/run1.test.js   # 88 assertions: Run 1 foundation
-node tests/run2.test.js   # 148 assertions: migrated warehouse workflows
+node tests/run1.test.js   # 94 assertions: Run 1 foundation
+node tests/run2.test.js   # 161 assertions: migrated warehouse workflows
+node tests/run3.test.js   # 84 assertions: assign inventory
+node tests/run4.test.js   # 97 assertions: shared backend + multi-device
+node tests/run5.test.js   # 142 assertions: order foundation
+node tests/run6.test.js   # 103 assertions: order → sales order → WO
+node tests/run7.test.js   # 61 assertions: history pipeline
+node tests/run8.test.js   # 89 assertions: returns
+node tests/run9.test.js   # 90 assertions: pilot hardening (JS)
+node tests/run9-pg.test.js # 69 assertions: pilot hardening (PostgreSQL; needs local PG)
 ```

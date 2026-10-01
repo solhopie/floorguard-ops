@@ -25,7 +25,7 @@ function daypart() {
   return 'evening';
 }
 
-var APP_VERSION = '0.8.0';
+var APP_VERSION = '0.9.0';
 
 /* ---------------- data layer ----------------
    One localStorage key, schema version, per-module namespaces.
@@ -1139,9 +1139,12 @@ function assignRemnantInventoryLocal(o) {
     return { ok: false, err: 'INSUFFICIENT REMNANT LENGTH', detail: 'Remnant has ' + fmtLen(rem.lengthIn) + '; cannot reserve ' + fmtLen(reservedIn) + '.' };
   var compat = checkCompatibility(rem, line);
   var mismatchBy = o.mismatchApprovedBy || null;
+  var overrideReason = o.overrideReason || null;
   if ((compat.verdict === 'MISMATCH' || compat.verdict === 'INCOMPLETE') &&
       !(mismatchBy && isSupervisorRole(mismatchBy)))
     return { ok: false, err: 'MATERIAL ' + compat.verdict + ' — SUPERVISOR APPROVAL REQUIRED', compat: compat };
+  if ((compat.verdict === 'MISMATCH' || compat.verdict === 'INCOMPLETE') && !overrideReason)
+    return { ok: false, err: 'OVERRIDE REASON REQUIRED', compat: compat };
   return retIdem(o.requestKey, function () {
     var now = new Date().toISOString();
     var rec = {
@@ -1151,7 +1154,7 @@ function assignRemnantInventoryLocal(o) {
       employee: employee, warehouseId: DB.data.currentWarehouse,
       location: rem.locationCode || '',
       at: now, status: AI_STATUS.RESERVED,
-      mismatchApprovedBy: mismatchBy,
+      mismatchApprovedBy: mismatchBy, overrideReason: overrideReason,
       rollVerifiedAt: null, rollVerifiedBy: null,
       locationVerifiedAt: null, locationVerifiedBy: null,
       releasedAt: null, releasedBy: null,
@@ -1163,7 +1166,8 @@ function assignRemnantInventoryLocal(o) {
     logAssignEvent('REMNANT_ASSIGNED', {
       user: employee, workOrderId: wo.id, lineId: line.id, remnantId: rem.id, assignmentId: rec.id,
       detail: 'Remnant ' + rem.number + ' → ' + wo.number + ' line ' + line.id +
-        ', reserved ' + fmtLen(reservedIn) + (mismatchBy ? ' (material override: ' + mismatchBy + ')' : '')
+        ', reserved ' + fmtLen(reservedIn) + (mismatchBy ? ' (material override: ' + mismatchBy +
+        (overrideReason ? ' — ' + overrideReason : '') + ')' : '')
     });
     var r = returnById(rem.returnId);
     logReturnEvent('RETURN_REMNANT_ASSIGNED', { returnId: rem.returnId, returnNumber: r && r.number,
@@ -1257,6 +1261,7 @@ var NAV = [
     { route: 'contact',  label: 'Contact',  icon: '📞' }
   ] },
   { group: 'SYSTEM', items: [
+    { route: 'scanner-test', label: 'Scanner Test', icon: '🔬' },
     { route: 'settings',  label: 'Settings', icon: '⚙️' },
     { route: '__logout',  label: 'Logout',   icon: '🚪' }
   ] }
@@ -1689,6 +1694,15 @@ Screens.dashboard = function () {
   };
 };
 
+/* Run 9: a failed first-run backend check is shown on the Settings screen
+   after the re-render that follows enabling Shared Pilot. */
+var PendingBackendError = null;
+function stashBackendCheckResult(res) {
+  if (res && res.ok === false) {
+    var f = (res.checks || []).filter(function (c) { return !c.ok; })[0];
+    PendingBackendError = (f && f.detail) || 'Backend check failed.';
+  }
+}
 Screens.settings = function () {
   var emps = DB.data.employees.map(function (e) {
     var you = (e === DB.data.currentEmployee) ? ' <span class="chip">YOU</span>' : '';
@@ -1737,8 +1751,16 @@ Screens.settings = function () {
       '</div>' +
       '<div class="err" id="dm-err" hidden></div>' +
       '</div>' +
+      /* Run 9: Pilot Diagnostics entry (Manager/Admin only). */
+      (function () {
+        var _r = (DB.data.employeeRoles || {})[DB.data.currentEmployee] || '';
+        if (_r !== 'MANAGER' && _r !== 'ADMIN') return '';
+        return '<div class="card"><h2>Pilot Diagnostics</h2>' +
+          '<p class="hint">Verify the Shared Pilot backend link: connectivity, sign-in, schema version, warehouse, and storage.</p>' +
+          '<button class="btn" id="set-diag">OPEN PILOT DIAGNOSTICS</button></div>';
+      })() +
       '<div class="card"><h2>About</h2>' +
-      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 6)</span></div>' +
+      '<div class="kv"><span class="k">Version</span><span class="num">' + esc(APP_VERSION) + ' (Run 9)</span></div>' +
       '<div class="kv"><span class="k">Storage key</span><span class="mono">' + esc(DB.KEY) + '</span></div>' +
       '<div class="kv"><span class="k">Schema</span><span class="num">v' + DB.SCHEMA + '</span></div>' +
       '</div>' +
@@ -1760,6 +1782,12 @@ Screens.settings = function () {
         }
       };
       $('#set-reset').onclick = function () {
+        /* Run 9: shared-mode destructive reset is Admin-only. */
+        var g = canResetData();
+        if (!g.ok) {
+          showConfirm({ title: 'Reset restricted', body: esc(g.reason), okLabel: 'UNDERSTOOD' });
+          return;
+        }
         showConfirm({
           title: 'Reset demo data?',
           body: 'This clears employees, the session, and all module data on this device.',
@@ -1767,6 +1795,8 @@ Screens.settings = function () {
           onOk: function () { DB.reset(); go('signin'); }
         });
       };
+      var _diagBtn = $('#set-diag');
+      if (_diagBtn) _diagBtn.onclick = function () { go('pilot-diagnostics'); };
       /* ---- Run 4: Data mode ---- */
       if (typeof Repository !== 'undefined') {
         var dmErr = function (m) { var e = $('#dm-err'); e.innerHTML = m; e.hidden = false; };
@@ -1784,6 +1814,8 @@ Screens.settings = function () {
           if ($('#dm-email') && !$('#dm-email').value) $('#dm-email').value = sess ? (sess.email || '') : '';
           updateSyncIndicator();
         };
+        /* Run 9: surface a failed first-run backend check after re-render. */
+        if (PendingBackendError) { dmErr(esc(PendingBackendError)); PendingBackendError = null; }
         $('#dm-local').onclick = function () {
           dmClearErr();
           Repository.saveConfig({ dataProvider: 'local' });
@@ -1796,7 +1828,12 @@ Screens.settings = function () {
           var mode = Repository.saveConfig({ dataProvider: 'shared' });
           dmPaint();
           if (mode !== 'shared') dmErr('Enter the Supabase URL and anon key, then SAVE SETTINGS to enable Shared Pilot.');
-          else toast('Shared Pilot mode');
+          else {
+            /* Run 9: first-run backend readiness check with specific errors. */
+            toast('Shared Pilot mode — checking backend…');
+            runSharedBackendCheck().then(stashBackendCheckResult).then(function () { render(); });
+            return;
+          }
           render();
         };
         $('#dm-save').onclick = function () {
@@ -1808,7 +1845,12 @@ Screens.settings = function () {
           $('#dm-key').value = '';
           dmPaint();
           if (mode !== 'shared') dmErr('Enter both the Supabase URL and the anon key to enable Shared Pilot.');
-          else { toast('Shared settings saved'); render(); }
+          else {
+            /* Run 9: first-run backend readiness check with specific errors. */
+            toast('Shared settings saved — checking backend…');
+            runSharedBackendCheck().then(stashBackendCheckResult).then(function () { render(); });
+            return;
+          }
         };
         $('#dm-signin').onclick = function () {
           dmClearErr();
@@ -1817,6 +1859,13 @@ Screens.settings = function () {
           Repository.signIn(em, pw).then(function () {
             $('#dm-pass').value = '';
             dmPaint(); toast('Signed in for shared writes');
+            /* Run 9: readiness check right after sign-in, specific errors. */
+            runSharedBackendCheck().then(function (res) {
+              if (res && res.ok === false) {
+                var f = (res.checks || []).filter(function (c) { return !c.ok; })[0];
+                dmErr(esc((f && f.detail) || 'Backend check failed.'));
+              }
+            });
           }).catch(function (err) {
             dmErr(esc(err && err.message ? err.message : 'Sign-in failed.'));
           });
@@ -6485,6 +6534,12 @@ Screens['remnant/assign'] = function (param) {
     '<div class="field"><label class="label">MATERIAL LINE</label>' +
     '<select class="input" id="ra-line"></select></div>' +
     '<div id="ra-compat"></div>' +
+    /* Run 9: supervisor override with recorded reason for material mismatches. */
+    '<div id="ra-override" hidden><div class="warn-panel"><b>SUPERVISOR OVERRIDE</b>' +
+    '<p class="hint">Material mismatch — a supervisor must approve with a reason. The reason is stored server-side in the audit trail.</p>' +
+    '<div class="field"><label class="label" for="ra-reason">OVERRIDE REASON (REQUIRED)</label>' +
+    '<textarea class="input" id="ra-reason" rows="2" placeholder="Why is this substitution acceptable?"></textarea></div>' +
+    '</div></div>' +
     '<div class="field"><label class="label">RESERVE (INCHES)</label>' +
     '<input class="input num" id="ra-qty" inputmode="numeric" value="' + m.lengthIn + '"></div>' +
     '<p class="hint" id="ra-err" hidden></p>' +
@@ -6517,6 +6572,13 @@ Screens['remnant/assign'] = function (param) {
         (c.mismatches.length ? '<p class="hint">Mismatches: ' +
           esc(c.mismatches.map(function (x) { return x.field; }).join(', ')) +
           ' — supervisor approval required.</p>' : '');
+      /* Run 9: show the override-reason capture for mismatches. */
+      var ov = $('#ra-override');
+      var needsOv = (c.verdict === 'MISMATCH' || c.verdict === 'INCOMPLETE');
+      ov.hidden = !needsOv;
+      if (needsOv && !isSupervisorRole(DB.data.currentEmployee)) {
+        compatEl.innerHTML += '<p class="hint">You are not signed in as a supervisor — ask one to sign in to approve this override.</p>';
+      }
     }
     woSel.onchange = refreshLines;
     lineSel.onchange = refreshCompat;
@@ -6526,6 +6588,20 @@ Screens['remnant/assign'] = function (param) {
       var w = woById(woSel.value), ls = linesFor(woSel.value);
       var line = ls.filter(function (l, i) { return String(l.id || i) === lineSel.value; })[0];
       if (!w || !line) { errEl.textContent = 'Pick a work order and material line.'; errEl.hidden = false; return; }
+      /* Run 9: supervisor override requires a recorded reason (server-enforced). */
+      var compat = checkCompatibility(m, line);
+      var needsOv = (compat.verdict === 'MISMATCH' || compat.verdict === 'INCOMPLETE');
+      var mismatchBy = null, overrideReason = null;
+      if (needsOv) {
+        if (!isSupervisorRole(DB.data.currentEmployee)) {
+          errEl.textContent = 'MATERIAL ' + compat.verdict + ' — SUPERVISOR APPROVAL REQUIRED'; errEl.hidden = false; return;
+        }
+        overrideReason = ($('#ra-reason') && $('#ra-reason').value || '').trim();
+        if (!overrideReason) {
+          errEl.textContent = 'OVERRIDE REASON REQUIRED — say why this substitution is acceptable.'; errEl.hidden = false; return;
+        }
+        mismatchBy = DB.data.currentEmployee;
+      }
       showConfirm({ title: 'Assign ' + m.number + '?',
         body: 'Reserve <b>' + fmtLen(qtyEl.value) + '</b> of ' + esc(m.number) + ' for ' + esc(w.number) + '.',
         confirm: 'ASSIGN',
@@ -6533,7 +6609,8 @@ Screens['remnant/assign'] = function (param) {
           run6Call(assignRemnantInventoryAsync({
             remnantId: m.id, woId: w.id, lineId: line.id || null,
             reservedIn: Math.round(Number(qtyEl.value) || 0),
-            employee: DB.data.currentEmployee, requestKey: rid('RA')
+            employee: DB.data.currentEmployee, requestKey: rid('RA'),
+            mismatchApprovedBy: mismatchBy, overrideReason: overrideReason
           }), function (res) {
             good(); toast('Remnant ' + m.number + ' assigned to ' + w.number + '.');
             go('returns', 'REMNANTS');
@@ -10691,6 +10768,277 @@ Screens['count/review'] = function () {
     '</div>';
   return { html: html, mount: function () { wireCountRows(); } };
 };
+
+/* ================= RUN 9: PILOT HARDENING =================
+   - Structured client error logging (no secrets, secret redaction)
+   - Scanner Test diagnostic screen (camera / wedge / manual, no writes)
+   - Pilot Diagnostics screen (Manager/Admin, connection test)
+   - Shared Pilot destructive-reset restriction (Admin only)
+   - First-run backend readiness check when enabling Shared Pilot
+   ============================================================ */
+
+/* ---- structured client error logging ----
+   Ring buffer in localStorage. NEVER logs tokens, keys, passwords, or
+   binary payloads: values under sensitive keys are replaced with [redacted]. */
+var ErrorLog = {
+  KEY: 'floorguard_ops_errorlog',
+  MAX: 200,
+  SENSITIVE: /token|secret|password|passwd|api[-_]?key|anon[-_]?key|service[-_]?role|bearer|cookie|session|refresh/i,
+  redact: function (v, depth) {
+    depth = depth || 0;
+    if (depth > 4) return '[truncated]';
+    if (v == null) return v;
+    if (typeof v === 'string') {
+      if (v.length > 2000) return '[binary/large payload omitted]';
+      return v;
+    }
+    if (typeof v !== 'object') return v;
+    if (Object.prototype.toString.call(v) === '[object ArrayBuffer]' ||
+        Object.prototype.toString.call(v) === '[object Uint8Array]') return '[binary omitted]';
+    var out = (v instanceof Array) ? [] : {};
+    for (var k in v) {
+      if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+      if (ErrorLog.SENSITIVE.test(k)) { out[k] = '[redacted]'; continue; }
+      try { out[k] = ErrorLog.redact(v[k], depth + 1); } catch (e) { out[k] = '[unserializable]'; }
+    }
+    return out;
+  },
+  list: function () {
+    try { return JSON.parse(localStorage.getItem(ErrorLog.KEY) || '[]'); }
+    catch (e) { return []; }
+  },
+  log: function (module, operation, code, detail) {
+    var entry = {
+      at: new Date().toISOString(), module: String(module || ''),
+      operation: String(operation || ''), code: String(code || 'UNKNOWN'),
+      detail: ErrorLog.redact(detail == null ? null : detail)
+    };
+    try {
+      var items = ErrorLog.list();
+      items.push(entry);
+      while (items.length > ErrorLog.MAX) items.shift();
+      localStorage.setItem(ErrorLog.KEY, JSON.stringify(items));
+    } catch (e) { /* logging must never break the app */ }
+    return entry;
+  },
+  clear: function () { try { localStorage.removeItem(ErrorLog.KEY); } catch (e) {} }
+};
+function logError(module, operation, code, detail) { return ErrorLog.log(module, operation, code, detail); }
+
+/* ---- barcode type detection (diagnostic aid; never authoritative) ---- */
+function detectBarcodeType(raw) {
+  var c = String(raw || '').trim().toUpperCase().replace(/^01/, '');
+  if (!c) return 'UNKNOWN';
+  if (c.indexOf('REM-') === 0) return 'REMNANT';
+  if (c.indexOf('RET-') === 0) return 'RETURN';
+  if (c.indexOf('WO-') === 0) return 'WORK ORDER';
+  if (c.indexOf('SO-') === 0) return 'SALES ORDER';
+  if (c.indexOf('ORD-') === 0) return 'ORDER';
+  if (/^\d+$/.test(c)) return 'ROLL';
+  /* Location codes look like 205B / 204A: short, letters + digits. */
+  if (/^(?=.*[A-Z])(?=.*\d)[A-Z0-9]{2,8}$/.test(c)) return 'LOCATION';
+  return 'UNKNOWN';
+}
+
+/* ---- camera permission states (section 22 audit) ----
+   Maps Scanner.start() outcomes to the four honest UI states. */
+function scannerCameraState(reason) {
+  if (!reason) return { key: 'ready', label: 'CAMERA READY', hint: 'Point the camera at a barcode.' };
+  if (reason === 'denied')
+    return { key: 'permission', label: 'CAMERA PERMISSION REQUIRED',
+      hint: 'Camera access was blocked. Allow camera access for this site in your browser settings, then retry — or use manual entry below.' };
+  return { key: 'unavailable', label: 'CAMERA NOT AVAILABLE',
+    hint: 'This device cannot scan with the camera (' + reason + '). Use the hardware scanner field or manual entry below — nothing here is blocked.' };
+}
+
+/* ================= SCANNER TEST (diagnostic) =================
+   Camera + hardware wedge + manual fallback. Shows raw value,
+   normalized value, detected type, timestamp, and location
+   normalization. NEVER writes to inventory. */
+var ScannerTest = { last: null };
+Screens['scanner-test'] = function () {
+  var html =
+    '<div class="screen">' + pageHead('&#129657; Scanner Test', 'Diagnostic only — never writes inventory') +
+    '<div class="card"><h2>1 &middot; Camera</h2>' +
+    '<div class="cambox" id="st-cambox"><div class="camnote" id="st-camstate">Starting camera&hellip;</div>' +
+    '<video id="st-video" playsinline muted style="width:100%;display:none"></video></div>' +
+    '<div class="btn-row"><button class="btn" id="st-retry">RETRY CAMERA</button></div>' +
+    '<p class="hint">If the camera cannot start, the state above says exactly why — permission, no camera API, or no reader on this device.</p></div>' +
+    '<div class="card"><h2>2 &middot; Hardware scanner (wedge)</h2>' +
+    '<p class="hint">Wedge scanners type as a keyboard. Click the field, then scan &mdash; the value lands here exactly as the scanner sent it.</p>' +
+    '<form id="st-wedgeform"><label class="f" for="st-wedge">WEDGE INPUT</label>' +
+    '<input type="text" id="st-wedge" class="mono" autocomplete="off" autocapitalize="characters" placeholder="Scan with wedge scanner">' +
+    '<button class="btn btn-primary" type="submit">TEST WEDGE VALUE</button></form></div>' +
+    '<div class="card"><h2>3 &middot; Manual entry (always available)</h2>' +
+    '<form id="st-manform"><label class="f" for="st-man">TYPE A BARCODE</label>' +
+    '<input type="text" id="st-man" class="mono" autocomplete="off" autocapitalize="characters" placeholder="e.g. 16628697, REM-1001, 205b">' +
+    '<button class="btn btn-primary" type="submit">TEST MANUAL VALUE</button></form></div>' +
+    '<div class="card" id="st-resultcard" hidden><h2>Scan result</h2>' +
+    '<div class="kv"><span class="k">Raw barcode value</span><span class="v mono" id="st-raw"></span></div>' +
+    '<div class="kv"><span class="k">Normalized value</span><span class="v mono" id="st-norm"></span></div>' +
+    '<div class="kv"><span class="k">Detected type</span><span class="v" id="st-type"></span></div>' +
+    '<div class="kv"><span class="k">Location normalization</span><span class="v mono" id="st-loc"></span></div>' +
+    '<div class="kv"><span class="k">Timestamp</span><span class="v mono" id="st-ts"></span></div>' +
+    '<p class="hint" id="st-note"></p></div>' +
+    '</div>';
+  return { html: html, mount: function () {
+    var stateEl = $('#st-camstate'), video = $('#st-video');
+    function showState(reason) {
+      var s = scannerCameraState(reason);
+      stateEl.innerHTML = '<b>' + esc(s.label) + '</b><br><span class="hint">' + esc(s.hint) + '</span>';
+    }
+    function startCam() {
+      showState(null);
+      stateEl.innerHTML = 'Starting camera&hellip;';
+      Scanner.start(video, function (raw) { onScan(raw, 'camera'); }).then(function (r) {
+        if (r && r.ok) { video.style.display = 'block'; showState(null); }
+        else { video.style.display = 'none'; showState(r && r.reason); }
+      });
+    }
+    function onScan(raw, source) {
+      var norm = normalizeBarcode(raw);
+      var locRaw = String(raw || '');
+      ScannerTest.last = { raw: raw, normalized: norm, type: detectBarcodeType(raw), at: new Date().toISOString(), source: source };
+      var card = $('#st-resultcard'); card.hidden = false;
+      $('#st-raw').textContent = raw;
+      $('#st-norm').textContent = norm;
+      $('#st-type').textContent = ScannerTest.last.type;
+      $('#st-loc').textContent = locRaw + ' → ' + normLoc(locRaw);
+      $('#st-ts').textContent = ScannerTest.last.at;
+      $('#st-note').textContent = 'Source: ' + source + '. This screen never writes to inventory — safe to test on live hardware.';
+      try { if (navigator.vibrate) navigator.vibrate(40); } catch (e) {}
+      card.scrollIntoView();
+    }
+    $('#st-retry').onclick = startCam;
+    $('#st-wedgeform').onsubmit = function (e) { e.preventDefault(); onScan($('#st-wedge').value, 'wedge'); };
+    $('#st-manform').onsubmit = function (e) { e.preventDefault(); onScan($('#st-man').value, 'manual'); };
+    startCam();
+  }, unmount: function () { try { Scanner.stop(); } catch (e) {} } };
+};
+
+/* ================= PILOT DIAGNOSTICS =================
+   Manager/Admin only. Verifies the Shared Pilot backend link and shows
+   exactly what works and what does not — never generic errors, and
+   never any credential material on screen. */
+var PilotDiag = { lastRun: null, role: null };
+function lastSuccessfulSyncAt() {
+  try { return localStorage.getItem('floorguard_ops_last_sync') || null; } catch (e) { return null; }
+}
+function runPilotDiagnostics(paint) {
+  if (typeof SharedRepo === 'undefined' || typeof SharedRepo.checkBackend !== 'function')
+    return Promise.resolve({ ok: false, checks: [], failedAt: 'unavailable' });
+  return SharedRepo.checkBackend().then(function (res) {
+    PilotDiag.lastRun = res;
+    var wh = null;
+    (res.checks || []).forEach(function (c) {
+      if (c.key === 'warehouse' && c.ok) {
+        var m = /role\s+([A-Z_]+)/.exec(c.detail || '');
+        if (m) PilotDiag.role = m[1];
+      }
+    });
+    if (res.ok) { try { localStorage.setItem('floorguard_ops_last_sync', new Date().toISOString()); } catch (e) {} }
+    else logError('diagnostics', 'checkBackend', res.failedAt || 'FAILED', { checks: (res.checks || []).map(function (c) { return c.key + ':' + (c.ok ? 'ok' : 'FAIL'); }) });
+    if (paint) paint(res);
+    return res;
+  });
+}
+function diagRow(key, label, value) {
+  return '<div class="kv"><span class="k">' + esc(label) + '</span><span class="v" id="pd-' + key + '">' + value + '</span></div>';
+}
+Screens['pilot-diagnostics'] = function () {
+  var role = (DB.data.employeeRoles || {})[DB.data.currentEmployee] || '';
+  var allowed = (role === 'MANAGER' || role === 'ADMIN');
+  if (!allowed)
+    return { html: '<div class="screen">' + pageHead('Pilot Diagnostics', 'Restricted') +
+      '<div class="card"><p class="hint">Pilot Diagnostics is available to Managers and Admins only.</p></div></div>' };
+  var shared = dataMode() === 'shared';
+  var html =
+    '<div class="screen">' + pageHead('&#129657; Pilot Diagnostics', 'Shared Pilot backend health') +
+    (shared ? '' : '<div class="card"><p class="hint">This device is in LOCAL DEMO mode. Diagnostics verify the Shared Pilot backend — switch to SHARED PILOT in Settings to run them against a live backend.</p></div>') +
+    '<div class="card"><h2>Backend connection</h2>' +
+    diagRow('backend', 'Backend connected', '&mdash;') +
+    diagRow('auth', 'Auth connected', '&mdash;') +
+    diagRow('warehouse', 'Warehouse', '&mdash;') +
+    diagRow('role', 'User role', esc(role || '—')) +
+    diagRow('schema', 'Schema version', '&mdash;') +
+    diagRow('storage', 'Storage access', '&mdash;') +
+    diagRow('sync', 'Last successful sync', esc(lastSuccessfulSyncAt() || 'never')) +
+    '<div class="btn-row"><button class="btn btn-primary" id="pd-run"' + (shared ? '' : ' disabled') + '>RUN CONNECTION TEST</button></div>' +
+    '<div class="err" id="pd-err" hidden></div>' +
+    '<div class="ok-panel" id="pd-ok" hidden><div class="big-ok">&#10003; ALL CHECKS PASSED</div></div>' +
+    '</div>' +
+    '<div class="card"><h2>About this device</h2>' +
+    diagRow('appver', 'App version', esc(APP_VERSION) + ' (Run 9)') +
+    diagRow('reqschema', 'Required schema', 'v' + (typeof REQUIRED_SCHEMA_VERSION !== 'undefined' ? REQUIRED_SCHEMA_VERSION : '?') + '+') +
+    diagRow('dmode', 'Data mode', shared ? 'SHARED PILOT' : 'LOCAL DEMO') +
+    '</div></div>';
+  return { html: html, mount: function () {
+    var runBtn = $('#pd-run');
+    function paint(res) {
+      var byKey = {};
+      (res.checks || []).forEach(function (c) { byKey[c.key] = c; });
+      function cell(key, extra) {
+        var el = $('#pd-' + key);
+        var c = byKey[key];
+        if (!el) return;
+        if (!c) { el.textContent = '—'; return; }
+        el.innerHTML = c.ok
+          ? '<span class="chip chip-green">CONNECTED</span> <span class="hint">' + esc(c.detail || '') + '</span>'
+          : '<span class="chip chip-red">FAILED</span> <span class="hint">' + esc(c.detail || '') + '</span>';
+        if (extra) el.innerHTML += ' <span class="hint">' + esc(extra) + '</span>';
+      }
+      cell('backend'); cell('auth'); cell('warehouse'); cell('storage');
+      (function () {
+        var el = $('#pd-schema'), c = byKey.schema;
+        if (el) el.innerHTML = c
+          ? (c.ok ? '<span class="chip chip-green">OK</span> ' : '<span class="chip chip-red">BEHIND</span> ') +
+            '<span class="hint">' + esc(c.detail || '') + '</span>'
+          : '—';
+      })();
+      var roleEl = $('#pd-role');
+      if (roleEl && PilotDiag.role) roleEl.innerHTML = esc(role) + ' <span class="hint">(backend: ' + esc(PilotDiag.role) + ')</span>';
+      var syncEl = $('#pd-sync');
+      if (syncEl) syncEl.textContent = lastSuccessfulSyncAt() || 'never';
+      var errEl = $('#pd-err'), okEl = $('#pd-ok');
+      if (res.ok) { errEl.hidden = true; okEl.hidden = false; }
+      else {
+        okEl.hidden = true;
+        var f = byKey[res.failedAt];
+        errEl.innerHTML = '<b>CHECK FAILED:</b> ' + esc((f && f.detail) || 'see above');
+        errEl.hidden = false;
+      }
+      runBtn.disabled = false;
+      runBtn.textContent = 'RUN CONNECTION TEST';
+    }
+    if (runBtn) runBtn.onclick = function () {
+      runBtn.disabled = true; runBtn.textContent = 'TESTING…';
+      $('#pd-err').hidden = true; $('#pd-ok').hidden = true;
+      runPilotDiagnostics(paint);
+    };
+  } };
+};
+
+/* ---- Run 9: first-run backend readiness check.
+   Called after Shared Pilot is enabled / settings saved: runs the five
+   gates and surfaces the specific failing step in Settings instead of a
+   generic network error. Safe to call repeatedly; quiet in local mode. */
+function runSharedBackendCheck() {
+  if (dataMode() !== 'shared') return Promise.resolve({ mode: 'local' });
+  if (typeof SharedRepo === 'undefined' || typeof SharedRepo.checkBackend !== 'function')
+    return Promise.resolve({ mode: 'shared', skipped: true });
+  return runPilotDiagnostics(null);
+}
+
+/* ---- Run 9: shared-mode destructive reset restriction ----
+   In Shared Pilot, RESET DEMO DATA clears the shared mirror and would
+   strand the device from the backend dataset — Admin only. Local Demo
+   keeps the old behavior. */
+function canResetData() {
+  if (dataMode() !== 'shared') return { ok: true };
+  var role = (DB.data.employeeRoles || {})[DB.data.currentEmployee] || '';
+  if (role === 'ADMIN') return { ok: true };
+  return { ok: false, reason: 'In SHARED PILOT, resetting data is restricted to Admins. Ask an Admin, or switch to LOCAL DEMO.' };
+}
 
 /* ---------------- boot ---------------------------------------------------------- */
 document.addEventListener('DOMContentLoaded', function () {

@@ -91,6 +91,13 @@ function writeProviderConfig(patch) {
   return cfg;
 }
 
+/* ---------------- Run 9: backend schema version ----------------
+   FloorGuard Ops v0.9 requires backend schema >= REQUIRED_SCHEMA_VERSION
+   (migration 0014 records applied versions in schema_version_history).
+   When the backend is behind, the app refuses shared operation with a
+   specific BACKEND UPDATE REQUIRED error instead of corrupting data. */
+var REQUIRED_SCHEMA_VERSION = 15;
+
 /* ---------------- auth session (shared mode, pilot) ----------------
    Supabase Auth email+password sign-in. The access token is sent as the
    PostgREST Bearer so RLS sees auth.uid() -> users.auth_user_id.
@@ -995,6 +1002,90 @@ var SharedRepo = {
       pgFetch('/auth/v1/logout', { method: 'POST', body: {} }).catch(function () {});
     }
     return Promise.resolve({ ok: true });
+  },
+
+  /* ---- Run 9: backend readiness check ----
+     Runs the five gates in order and returns the first failure with a
+     specific setup message (never a generic network error):
+       reachable -> auth session -> schema version -> warehouse membership -> storage
+     check = { key, label, ok, detail }. ok:false stops at the failed gate. */
+  getSchemaVersion: function () {
+    return pgFetch('/rest/v1/schema_version_history?select=version&order=version.desc&limit=1', {})
+      .then(function (rows) {
+        if (!rows || !rows.length) return null;
+        return rows[0].version;
+      });
+  },
+  checkBackend: function () {
+    var self = this;
+    var checks = [];
+    var step = function (key, label, fn) {
+      var p;
+      try { p = Promise.resolve().then(fn); }
+      catch (err) { p = Promise.reject(err); }
+      return p.then(function (detail) {
+        checks.push({ key: key, label: label, ok: true, detail: detail || '' });
+      }, function (err) {
+        var code = err && err.code ? '[' + err.code + '] ' : '';
+        checks.push({ key: key, label: label, ok: false,
+          detail: code + ((err && (err.message || err.code)) || 'failed') });
+        throw { failedAt: key, checks: checks };
+      });
+    };
+    return step('reachable', 'Backend reachable', function () {
+      return pgFetch('/rest/v1/', {}).then(function () { return 'PostgREST answered'; });
+    }).then(function () {
+      return step('auth', 'Signed in', function () {
+        var sess = readSession();
+        if (!sess || !sess.access_token)
+          throw RepoError('NOT_AUTHENTICATED', 'Not signed in. Sign in with your pilot email and password.');
+        return pgFetch('/auth/v1/user', {}).then(function (u) {
+          return 'Signed in as ' + ((u && u.email) || (sess.email || 'pilot user'));
+        });
+      });
+    }).then(function () {
+      return step('schema', 'Schema version', function () {
+        return self.getSchemaVersion().then(function (v) {
+          if (v == null)
+            throw RepoError('SCHEMA_UNKNOWN',
+              'Could not read schema version. Run all migrations (0001-' +
+              REQUIRED_SCHEMA_VERSION + ') on the Supabase project, then retry.');
+          if (v < REQUIRED_SCHEMA_VERSION)
+            throw RepoError('BACKEND_UPDATE_REQUIRED',
+              'Backend schema v' + v + ' is behind: this app requires v' +
+              REQUIRED_SCHEMA_VERSION + '+. Run migrations up to ' +
+              REQUIRED_SCHEMA_VERSION + ' in the Supabase SQL editor, then retry.');
+          return 'schema v' + v + ' (required v' + REQUIRED_SCHEMA_VERSION + '+)';
+        });
+      });
+    }).then(function () {
+      return step('warehouse', 'Warehouse membership', function () {
+        return self._get('users', { select: 'id,warehouse_id,role' }).then(function (rows) {
+          if (!rows || !rows.length)
+            throw RepoError('NO_WAREHOUSE',
+              'Signed in, but no warehouse user is linked to this login. ' +
+              'The owner must create the pilot user row (see PILOT_BACKEND_SETUP.md).');
+          var u = rows[0];
+          return 'warehouse ' + (u.warehouse_id || '?') + ' · role ' + (u.role || '?');
+        });
+      });
+    }).then(function () {
+      return step('storage', 'Document storage', function () {
+        return pgFetch('/storage/v1/bucket/history-cards', {}).then(function () {
+          return 'history-cards bucket reachable';
+        }, function (err) {
+          if (err && (err.code === 'NOT_FOUND' || /not found/i.test(err.message || '')))
+            throw RepoError('STORAGE_MISSING',
+              'The history-cards storage bucket does not exist. Create it as PRIVATE in the Supabase dashboard (see PILOT_BACKEND_SETUP.md).');
+          throw RepoError('STORAGE_DENIED',
+            'Storage not reachable with these credentials. Check the storage policies in PILOT_BACKEND_SETUP.md.');
+        });
+      });
+    }).then(function () {
+      return { ok: true, checks: checks };
+    }, function (fail) {
+      return { ok: false, failedAt: fail.failedAt, checks: fail.checks };
+    });
   },
 
   /* ---- work orders ---- */
@@ -2263,7 +2354,7 @@ var SharedRepo = {
   },
   assignRemnantInventory: function (o) {
     /* o: {workOrderId, lineId, remnantId, reservedIn, employee, warehouseId,
-           location, mismatchApprovedBy, clientRequestId} */
+           location, mismatchApprovedBy, overrideReason, clientRequestId} */
     var self = this;
     return self._rpc('reserve_remnant', {
       p_work_order_id: o.workOrderId, p_line_id: o.lineId || null,
@@ -2272,7 +2363,8 @@ var SharedRepo = {
       p_warehouse_id: o.warehouseId || self.wh(),
       p_location_code: o.location || null,
       p_client_request_id: o.clientRequestId || rid('AR'),
-      p_mismatch_approved_by: o.mismatchApprovedBy || null
+      p_mismatch_approved_by: o.mismatchApprovedBy || null,
+      p_override_reason: o.overrideReason || null
     }).then(function (res) {
       var r = self._rpcResult(res);
       return { ok: true, duplicate: !!r.duplicate, assignmentId: r.assignment_id,
@@ -2656,6 +2748,8 @@ var SharedRepo = {
       });
       DB.save();
       Sync.set(isOnline() ? 'SYNCED' : 'OFFLINE');
+      /* Run 9: last successful shared sync, shown in Pilot Diagnostics. */
+      try { lsSet('floorguard_ops_last_sync', new Date().toISOString()); } catch (e) {}
       return {
         ok: true, rolls: fg.rolls.length, workOrders: fg.workOrders.length,
         assignments: fg.inventoryAssignments.length, cuts: fg.cuts.length,
@@ -3096,6 +3190,7 @@ var SharedFlow = {
       warehouseId: Repository.config.warehouseId,
       location: v.rem.locationCode || '',
       mismatchApprovedBy: v.mismatchBy,
+      overrideReason: o.overrideReason || null,
       clientRequestId: o.clientRequestId || rid('AR')
     }).then(function (r) {
       var now = new Date().toISOString();

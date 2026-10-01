@@ -85,7 +85,7 @@ ok(JSON.stringify(groups) === JSON.stringify(['DASHBOARD', 'WAREHOUSE', 'OPERATI
    'nav groups in the specified order');
 var routes = [];
 NAV.forEach(function (g) { g.items.forEach(function (it) { routes.push(it.route); }); });
-ok(routes.length === 22, '22 nav items total, got ' + routes.length);
+ok(routes.length === 23, '23 nav items total (22 Run 8 + Scanner Test), got ' + routes.length);
 ok(new Set(routes).size === routes.length, 'all nav routes unique');
 routes.forEach(function (r) {
   if (r === '__logout') return;
